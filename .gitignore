@@ -1,0 +1,10 @@
+/target
+.DS_Store
+*.swp
+*.swo
+*~
+.planning/
+.gsd/
+.bg-shell/
+.zellij-attention-state.bin
+TODO.md
