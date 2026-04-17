@@ -346,6 +346,7 @@ keybinds {{
             MessagePluginId {plugin_id} {{
                 name "toggle_sidebar"
             }}
+            SwitchToMode "Normal"
         }}
     }}
     shared {{
@@ -443,6 +444,12 @@ impl ZellijPlugin for State {
             Event::SessionUpdate(sessions, _resurrectable) => {
                 self.rebuild_from_session_update(&sessions);
                 self.load_ai_states();
+                // Re-register keybind on every SessionUpdate — each session's plugin has a
+                // unique plugin_id, so switching sessions would otherwise point the bind at
+                // the wrong instance.
+                if self.is_primary && self.permissions_granted {
+                    self.setup_toggle_keybind();
+                }
 
                 // Auto-track cursor to current session when sidebar is not focused
                 if !self.is_focused {
