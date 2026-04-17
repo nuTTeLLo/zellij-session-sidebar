@@ -1,0 +1,44 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  claude:
+    name: Claude review
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          trigger_phrase: "@claude"
+          auto_review_enabled: "true"
+          auto_review_prompt: |
+            Review this PR for a Zellij terminal multiplexer plugin written in Rust (compiled to wasm32-wasip1).
+
+            Focus on:
+            - Correctness of the tree navigation logic (SessionNode, TabNode, TreeRow, cursor/scroll)
+            - Any logic that could panic (out-of-bounds, unwrap on None)
+            - Whether #[cfg(not(test))] gates are correctly applied to zellij shim-calling code
+            - Missing test coverage for new pure logic
+            - Anything that would break the wasm build
+
+            Skip style nits. Flag anything that would cause a runtime crash or incorrect behaviour in the sidebar.
