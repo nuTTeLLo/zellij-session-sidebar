@@ -66,6 +66,8 @@ pub struct State {
     pub is_focused: bool,
     pub session_layout: Option<String>,
     pub is_primary: bool,
+    pub toggle_key: String,    // e.g. "Ctrl o" or "Super o"
+    pub new_tab_key: String,   // e.g. "Ctrl t"
 
     // Attention and AI state — keyed by session name, survive SessionUpdate
     pub attention_sessions: BTreeSet<String>,
@@ -93,6 +95,8 @@ impl Default for State {
             is_focused: false,
             session_layout: None,
             is_primary: true,
+            toggle_key: "o".to_string(),
+            new_tab_key: "Ctrl t".to_string(),
             attention_sessions: BTreeSet::new(),
             ai_states: BTreeMap::new(),
             ai_state_since: BTreeMap::new(),
@@ -329,16 +333,23 @@ done
 
     fn setup_toggle_keybind(&self) {
         let plugin_id = get_plugin_ids().plugin_id;
+        let toggle_key = &self.toggle_key;
+        let new_tab_key = &self.new_tab_key;
+        // Toggle is bound in session mode (reached via Ctrl+O prefix),
+        // so the full sequence is e.g. Ctrl+O → o.
+        // New tab is bound in shared mode as it's a creation action.
         let config = format!(
             r#"
 keybinds {{
-    shared {{
-        bind "Super o" {{
+    session {{
+        bind "{toggle_key}" {{
             MessagePluginId {plugin_id} {{
                 name "toggle_sidebar"
             }}
         }}
-        bind "Super t" {{
+    }}
+    shared {{
+        bind "{new_tab_key}" {{
             MessagePluginId {plugin_id} {{
                 name "new_tab_with_sidebar"
             }}
@@ -348,7 +359,7 @@ keybinds {{
 "#,
         );
         reconfigure(config, false);
-        eprintln!("Keybinds registered for plugin {}: Super+o (toggle), Super+t (new tab)", plugin_id);
+        eprintln!("Keybinds registered for plugin {}: Ctrl+O,{} (toggle), {} (new tab)", plugin_id, toggle_key, new_tab_key);
     }
 
     fn create_tab_with_sidebar(&self) {
@@ -381,6 +392,8 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.session_layout = configuration.get("session_layout").map(|p| expand_tilde(p));
         self.is_primary = configuration.get("is_primary").map(|v| v != "false").unwrap_or(true);
+        if let Some(k) = configuration.get("toggle_key") { self.toggle_key = k.clone(); }
+        if let Some(k) = configuration.get("new_tab_key") { self.new_tab_key = k.clone(); }
 
         request_permission(&[
             PermissionType::ReadApplicationState,
