@@ -68,6 +68,7 @@ pub struct State {
     pub is_primary: bool,
     pub toggle_key: String,    // e.g. "Ctrl o" or "Super o"
     pub new_tab_key: String,   // e.g. "Ctrl t"
+    pub hint: Option<String>,  // custom footer hint when unfocused
 
     // Attention and AI state — keyed by session name, survive SessionUpdate
     pub attention_sessions: BTreeSet<String>,
@@ -97,6 +98,7 @@ impl Default for State {
             is_primary: true,
             toggle_key: "o".to_string(),
             new_tab_key: "Ctrl t".to_string(),
+            hint: None,
             attention_sessions: BTreeSet::new(),
             ai_states: BTreeMap::new(),
             ai_state_since: BTreeMap::new(),
@@ -395,6 +397,7 @@ impl ZellijPlugin for State {
         self.is_primary = configuration.get("is_primary").map(|v| v != "false").unwrap_or(true);
         if let Some(k) = configuration.get("toggle_key") { self.toggle_key = k.clone(); }
         if let Some(k) = configuration.get("new_tab_key") { self.new_tab_key = k.clone(); }
+        self.hint = configuration.get("hint").cloned();
 
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -598,8 +601,10 @@ impl ZellijPlugin for State {
 
         // Footer hint — pinned to bottom
         let footer_y = rows.saturating_sub(1);
+        let default_unfocused = " ^O,o to toggle";
+        let unfocused_hint = self.hint.as_deref().unwrap_or(default_unfocused);
         let hint = if !self.is_focused {
-            " ^O,o to toggle"
+            unfocused_hint
         } else {
             " ↑↓:nav ↵:switch del:kill esc:exit"
         };
