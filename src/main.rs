@@ -599,7 +599,7 @@ impl ZellijPlugin for State {
         // Footer hint — pinned to bottom
         let footer_y = rows.saturating_sub(1);
         let hint = if !self.is_focused {
-            " ⌘O to toggle"
+            " ^O,o to toggle"
         } else {
             " ↑↓:nav ↵:switch del:kill esc:exit"
         };
