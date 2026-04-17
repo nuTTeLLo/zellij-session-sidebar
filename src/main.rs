@@ -7,9 +7,11 @@ use std::path::PathBuf;
 //   1 = emphasis_1 (cyan)
 //   2 = emphasis_2 (green)
 //   3 = emphasis_3 (magenta)
+#[allow(dead_code)]
 const COLOR_ORANGE: usize = 0;
 const COLOR_CYAN: usize = 1;
 const COLOR_GREEN: usize = 2;
+#[allow(dead_code)]
 const COLOR_MAGENTA: usize = 3;
 
 const CMD_KEY: &str = "cmd";
@@ -19,7 +21,7 @@ const CMD_LOAD_AI: &str = "load_ai";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AgentState {
+pub enum AgentState {
     Active,
     Idle,
     Waiting,
@@ -33,49 +35,50 @@ impl Default for AgentState {
 }
 
 #[derive(Clone)]
-struct TabNode {
-    index: usize,   // tab position for switch_session_with_focus
-    name: String,
-    is_active: bool,
-    pane_count: usize,
+pub struct TabNode {
+    pub index: usize,   // tab position for switch_session_with_focus
+    pub name: String,
+    pub is_active: bool,
+    pub pane_count: usize,
 }
 
 #[derive(Clone)]
-struct SessionNode {
-    name: String,
-    is_current: bool,
-    tabs: Vec<TabNode>,
+pub struct SessionNode {
+    pub name: String,
+    pub is_current: bool,
+    pub tabs: Vec<TabNode>,
 }
 
-enum TreeRow {
+pub enum TreeRow {
     Session(usize),        // sessions[si]
     Tab(usize, usize),     // sessions[si].tabs[ti]
 }
 
 // --- State ---
 
-struct State {
-    permissions_granted: bool,
-    sessions: Vec<SessionNode>,
-    expanded_sessions: BTreeSet<String>,
-    cursor: usize,
-    scroll_offset: usize,
-    initial_load_complete: bool,
-    is_focused: bool,
-    session_layout: Option<String>,
-    is_primary: bool,
+pub struct State {
+    pub permissions_granted: bool,
+    pub sessions: Vec<SessionNode>,
+    pub expanded_sessions: BTreeSet<String>,
+    pub cursor: usize,
+    pub scroll_offset: usize,
+    pub initial_load_complete: bool,
+    pub is_focused: bool,
+    pub session_layout: Option<String>,
+    pub is_primary: bool,
 
     // Attention and AI state — keyed by session name, survive SessionUpdate
-    attention_sessions: BTreeSet<String>,
-    ai_states: BTreeMap<String, AgentState>,
-    ai_state_since: BTreeMap<String, u64>,
-    ai_last_duration: BTreeMap<String, u64>,
-    ai_pane_count: BTreeMap<String, usize>,
-    ai_agent_name: BTreeMap<String, String>,
+    pub attention_sessions: BTreeSet<String>,
+    pub ai_states: BTreeMap<String, AgentState>,
+    pub ai_state_since: BTreeMap<String, u64>,
+    pub ai_last_duration: BTreeMap<String, u64>,
+    #[allow(dead_code)]
+    pub ai_pane_count: BTreeMap<String, usize>,
+    pub ai_agent_name: BTreeMap<String, String>,
 
     // Pills and progress — keyed by session name
-    pills: BTreeMap<String, BTreeMap<String, String>>,
-    progress: BTreeMap<String, u8>,
+    pub pills: BTreeMap<String, BTreeMap<String, String>>,
+    pub progress: BTreeMap<String, u8>,
 }
 
 impl Default for State {
@@ -102,11 +105,9 @@ impl Default for State {
     }
 }
 
-register_plugin!(State);
-
 // --- Helpers ---
 
-fn parse_session_agent(rest: &str) -> (&str, Option<&str>) {
+pub fn parse_session_agent(rest: &str) -> (&str, Option<&str>) {
     if let Some(idx) = rest.find("::") {
         let agent = &rest[idx + 2..];
         (&rest[..idx], if agent.is_empty() { None } else { Some(agent) })
@@ -115,7 +116,7 @@ fn parse_session_agent(rest: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn expand_tilde(path: &str) -> String {
+pub fn expand_tilde(path: &str) -> String {
     if path == "~" {
         std::env::var("HOME").unwrap_or_else(|_| path.to_string())
     } else if let Some(rest) = path.strip_prefix("~/") {
@@ -126,10 +127,10 @@ fn expand_tilde(path: &str) -> String {
     }
 }
 
-// --- State Methods ---
+// --- Pure State Methods (always compiled, tested) ---
 
 impl State {
-    fn rebuild_from_session_update(&mut self, sessions: &[SessionInfo]) {
+    pub fn rebuild_from_session_update(&mut self, sessions: &[SessionInfo]) {
         let current_name = sessions.iter()
             .find(|s| s.is_current_session)
             .map(|s| s.name.clone());
@@ -166,7 +167,7 @@ impl State {
         // and SessionUpdate fires on every switch which could wipe pipe-delivered state.
     }
 
-    fn build_visible_rows(&self) -> Vec<TreeRow> {
+    pub fn build_visible_rows(&self) -> Vec<TreeRow> {
         let mut rows = Vec::new();
         for (si, session) in self.sessions.iter().enumerate() {
             rows.push(TreeRow::Session(si));
@@ -179,7 +180,7 @@ impl State {
         rows
     }
 
-    fn clamp_cursor(&mut self) {
+    pub fn clamp_cursor(&mut self) {
         let len = self.build_visible_rows().len();
         if len == 0 {
             self.cursor = 0;
@@ -188,7 +189,7 @@ impl State {
         }
     }
 
-    fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+    pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
         if visible_rows == 0 {
             return;
         }
@@ -201,7 +202,7 @@ impl State {
     }
 
     /// Returns the session index the cursor is on (whether on a Session or Tab row).
-    fn cursor_session_index(&self) -> Option<usize> {
+    pub fn cursor_session_index(&self) -> Option<usize> {
         let rows = self.build_visible_rows();
         match rows.get(self.cursor) {
             Some(TreeRow::Session(si)) => Some(*si),
@@ -210,49 +211,77 @@ impl State {
         }
     }
 
-    fn setup_toggle_keybind(&self) {
-        let plugin_id = get_plugin_ids().plugin_id;
-        let config = format!(
-            r#"
-keybinds {{
-    shared {{
-        bind "Super o" {{
-            MessagePluginId {plugin_id} {{
-                name "toggle_sidebar"
-            }}
-        }}
-        bind "Super t" {{
-            MessagePluginId {plugin_id} {{
-                name "new_tab_with_sidebar"
-            }}
-        }}
-    }}
-}}
-"#,
-        );
-        reconfigure(config, false);
-        eprintln!("Keybinds registered for plugin {}: Super+o (toggle), Super+t (new tab)", plugin_id);
-    }
+    pub fn apply_ai_states_from_output(&mut self, stdout: &[u8]) {
+        // Each line: "SESSION STATE TIMESTAMP DURATION [AGENT]"
+        let output = String::from_utf8_lossy(stdout);
+        for line in output.lines() {
+            let parts: Vec<&str> = line.trim().split(' ').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let session = parts[0];
+            let state = match parts.get(1).copied() {
+                Some("active") => AgentState::Active,
+                Some("idle") => AgentState::Idle,
+                Some("waiting") => AgentState::Waiting,
+                _ => continue,
+            };
+            let ts = parts.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let dur = parts.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let agent = parts.get(4).copied().unwrap_or("").trim();
 
-    fn create_tab_with_sidebar(&self) {
-        if let Some(ref layout_path) = self.session_layout {
-            new_tabs_with_layout_info(LayoutInfo::File(layout_path.clone(), Default::default()));
-        } else {
-            new_tabs_with_layout("layout { pane }");
+            self.ai_states.insert(session.to_string(), state);
+            if ts > 0 {
+                self.ai_state_since.insert(session.to_string(), ts);
+            }
+            if dur > 0 {
+                self.ai_last_duration.insert(session.to_string(), dur);
+            }
+            if !agent.is_empty() {
+                self.ai_agent_name.insert(session.to_string(), agent.to_string());
+            }
         }
     }
 
-    fn toggle_visibility(&mut self) {
-        if self.is_focused {
-            set_selectable(false);
-            self.is_focused = false;
+    pub fn now_secs(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    pub fn format_elapsed(&self, session: &str) -> String {
+        if let Some(&since) = self.ai_state_since.get(session) {
+            let elapsed = self.now_secs().saturating_sub(since);
+            Self::format_duration(elapsed)
         } else {
-            set_selectable(true);
-            focus_plugin_pane(get_plugin_ids().plugin_id, false, false);
-            self.is_focused = true;
+            String::new()
         }
     }
 
+    pub fn format_last_duration(&self, session: &str) -> String {
+        if let Some(&dur) = self.ai_last_duration.get(session) {
+            Self::format_duration(dur)
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn format_duration(secs: u64) -> String {
+        if secs < 60 {
+            format!("{}s", secs)
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else {
+            format!("{}h", secs / 3600)
+        }
+    }
+}
+
+// --- Plugin-only State Methods (excluded from test builds to avoid unresolved shim symbols) ---
+
+#[cfg(not(test))]
+impl State {
     fn load_ai_states(&mut self) {
         let script = r#"
 dir=/tmp/sidebar-ai
@@ -298,75 +327,56 @@ done
         );
     }
 
-    fn apply_ai_states_from_output(&mut self, stdout: &[u8]) {
-        // Each line: "SESSION STATE TIMESTAMP DURATION [AGENT]"
-        let output = String::from_utf8_lossy(stdout);
-        for line in output.lines() {
-            let parts: Vec<&str> = line.trim().split(' ').collect();
-            if parts.len() < 2 {
-                continue;
-            }
-            let session = parts[0];
-            let state = match parts.get(1).copied() {
-                Some("active") => AgentState::Active,
-                Some("idle") => AgentState::Idle,
-                Some("waiting") => AgentState::Waiting,
-                _ => continue,
-            };
-            let ts = parts.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let dur = parts.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            let agent = parts.get(4).copied().unwrap_or("").trim();
+    fn setup_toggle_keybind(&self) {
+        let plugin_id = get_plugin_ids().plugin_id;
+        let config = format!(
+            r#"
+keybinds {{
+    shared {{
+        bind "Super o" {{
+            MessagePluginId {plugin_id} {{
+                name "toggle_sidebar"
+            }}
+        }}
+        bind "Super t" {{
+            MessagePluginId {plugin_id} {{
+                name "new_tab_with_sidebar"
+            }}
+        }}
+    }}
+}}
+"#,
+        );
+        reconfigure(config, false);
+        eprintln!("Keybinds registered for plugin {}: Super+o (toggle), Super+t (new tab)", plugin_id);
+    }
 
-            self.ai_states.insert(session.to_string(), state);
-            if ts > 0 {
-                self.ai_state_since.insert(session.to_string(), ts);
-            }
-            if dur > 0 {
-                self.ai_last_duration.insert(session.to_string(), dur);
-            }
-            if !agent.is_empty() {
-                self.ai_agent_name.insert(session.to_string(), agent.to_string());
-            }
+    fn create_tab_with_sidebar(&self) {
+        if let Some(ref layout_path) = self.session_layout {
+            new_tabs_with_layout_info(LayoutInfo::File(layout_path.clone(), Default::default()));
+        } else {
+            new_tabs_with_layout("layout { pane }");
         }
     }
 
-    fn now_secs(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    }
-
-    fn format_elapsed(&self, session: &str) -> String {
-        if let Some(&since) = self.ai_state_since.get(session) {
-            let elapsed = self.now_secs().saturating_sub(since);
-            Self::format_duration(elapsed)
+    fn toggle_visibility(&mut self) {
+        if self.is_focused {
+            set_selectable(false);
+            self.is_focused = false;
         } else {
-            String::new()
-        }
-    }
-
-    fn format_last_duration(&self, session: &str) -> String {
-        if let Some(&dur) = self.ai_last_duration.get(session) {
-            Self::format_duration(dur)
-        } else {
-            String::new()
-        }
-    }
-
-    fn format_duration(secs: u64) -> String {
-        if secs < 60 {
-            format!("{}s", secs)
-        } else if secs < 3600 {
-            format!("{}m", secs / 60)
-        } else {
-            format!("{}h", secs / 3600)
+            set_selectable(true);
+            focus_plugin_pane(get_plugin_ids().plugin_id, false, false);
+            self.is_focused = true;
         }
     }
 }
 
-// --- Plugin Lifecycle ---
+// --- Plugin Lifecycle (excluded from test builds) ---
 
+#[cfg(not(test))]
+register_plugin!(State);
+
+#[cfg(not(test))]
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.session_layout = configuration.get("session_layout").map(|p| expand_tilde(p));
@@ -702,5 +712,386 @@ impl ZellijPlugin for State {
             }
             _ => false,
         }
+    }
+}
+
+// --- Tests ---
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: build a minimal SessionInfo with just name + is_current + tabs
+    fn make_session(name: &str, is_current: bool, tabs: Vec<TabInfo>) -> SessionInfo {
+        SessionInfo {
+            name: name.to_string(),
+            is_current_session: is_current,
+            tabs,
+            ..Default::default()
+        }
+    }
+
+    fn make_tab(position: usize, name: &str, active: bool) -> TabInfo {
+        TabInfo {
+            position,
+            name: name.to_string(),
+            active,
+            ..Default::default()
+        }
+    }
+
+    fn make_state_with_sessions(sessions: &[(&str, bool, &[&str])]) -> State {
+        // sessions: (name, is_current, tab_names)
+        let mut state = State::default();
+        state.sessions = sessions.iter().map(|(name, is_current, tab_names)| {
+            SessionNode {
+                name: name.to_string(),
+                is_current: *is_current,
+                tabs: tab_names.iter().enumerate().map(|(ti, tname)| TabNode {
+                    index: ti,
+                    name: tname.to_string(),
+                    is_active: ti == 0,
+                    pane_count: 1,
+                }).collect(),
+            }
+        }).collect();
+        state
+    }
+
+    // --- parse_session_agent ---
+
+    #[test]
+    fn test_parse_session_agent_no_agent() {
+        let (session, agent) = parse_session_agent("my-session");
+        assert_eq!(session, "my-session");
+        assert_eq!(agent, None);
+    }
+
+    #[test]
+    fn test_parse_session_agent_with_agent() {
+        let (session, agent) = parse_session_agent("my-session::claude");
+        assert_eq!(session, "my-session");
+        assert_eq!(agent, Some("claude"));
+    }
+
+    #[test]
+    fn test_parse_session_agent_empty_agent() {
+        let (session, agent) = parse_session_agent("my-session::");
+        assert_eq!(session, "my-session");
+        assert_eq!(agent, None);
+    }
+
+    // --- expand_tilde ---
+
+    #[test]
+    fn test_expand_tilde_absolute() {
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+    }
+
+    #[test]
+    fn test_expand_tilde_tilde_only() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(expand_tilde("~"), home);
+    }
+
+    #[test]
+    fn test_expand_tilde_tilde_prefix() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(expand_tilde("~/projects"), format!("{}/projects", home));
+    }
+
+    // --- format_duration ---
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(State::format_duration(0), "0s");
+        assert_eq!(State::format_duration(1), "1s");
+        assert_eq!(State::format_duration(59), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes() {
+        assert_eq!(State::format_duration(60), "1m");
+        assert_eq!(State::format_duration(90), "1m");
+        assert_eq!(State::format_duration(3599), "59m");
+    }
+
+    #[test]
+    fn test_format_duration_hours() {
+        assert_eq!(State::format_duration(3600), "1h");
+        assert_eq!(State::format_duration(7200), "2h");
+    }
+
+    // --- rebuild_from_session_update ---
+
+    #[test]
+    fn test_rebuild_current_session_sorts_first() {
+        let mut state = State::default();
+        let sessions = vec![
+            make_session("zebra", false, vec![]),
+            make_session("alpha", false, vec![]),
+            make_session("current", true, vec![]),
+        ];
+        state.rebuild_from_session_update(&sessions);
+        assert_eq!(state.sessions[0].name, "current");
+    }
+
+    #[test]
+    fn test_rebuild_non_current_sorted_alpha() {
+        let mut state = State::default();
+        let sessions = vec![
+            make_session("zebra", false, vec![]),
+            make_session("alpha", false, vec![]),
+            make_session("mango", false, vec![]),
+        ];
+        state.rebuild_from_session_update(&sessions);
+        assert_eq!(state.sessions[0].name, "alpha");
+        assert_eq!(state.sessions[1].name, "mango");
+        assert_eq!(state.sessions[2].name, "zebra");
+    }
+
+    #[test]
+    fn test_rebuild_auto_expands_current() {
+        let mut state = State::default();
+        let sessions = vec![
+            make_session("other", false, vec![]),
+            make_session("current", true, vec![]),
+        ];
+        state.rebuild_from_session_update(&sessions);
+        assert!(state.expanded_sessions.contains("current"));
+        assert!(!state.expanded_sessions.contains("other"));
+    }
+
+    #[test]
+    fn test_rebuild_prunes_expanded_for_gone_sessions() {
+        let mut state = State::default();
+        state.expanded_sessions.insert("gone-session".to_string());
+        let sessions = vec![make_session("alive", false, vec![])];
+        state.rebuild_from_session_update(&sessions);
+        assert!(!state.expanded_sessions.contains("gone-session"));
+    }
+
+    #[test]
+    fn test_rebuild_keeps_expanded_for_existing_sessions() {
+        let mut state = State::default();
+        state.expanded_sessions.insert("still-here".to_string());
+        let sessions = vec![make_session("still-here", false, vec![])];
+        state.rebuild_from_session_update(&sessions);
+        assert!(state.expanded_sessions.contains("still-here"));
+    }
+
+    #[test]
+    fn test_rebuild_extracts_tab_data() {
+        let mut state = State::default();
+        let sessions = vec![make_session("s", false, vec![
+            make_tab(0, "main", true),
+            make_tab(1, "logs", false),
+        ])];
+        state.rebuild_from_session_update(&sessions);
+        assert_eq!(state.sessions[0].tabs.len(), 2);
+        assert_eq!(state.sessions[0].tabs[0].name, "main");
+        assert!(state.sessions[0].tabs[0].is_active);
+        assert_eq!(state.sessions[0].tabs[1].name, "logs");
+        assert!(!state.sessions[0].tabs[1].is_active);
+    }
+
+    // --- build_visible_rows ---
+
+    #[test]
+    fn test_visible_rows_all_collapsed() {
+        let mut state = make_state_with_sessions(&[
+            ("session-a", false, &["main"]),
+            ("session-b", false, &["main"]),
+        ]);
+        state.expanded_sessions.clear();
+        let rows = state.build_visible_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], TreeRow::Session(0)));
+        assert!(matches!(rows[1], TreeRow::Session(1)));
+    }
+
+    #[test]
+    fn test_visible_rows_one_expanded() {
+        let mut state = make_state_with_sessions(&[
+            ("session-a", false, &["main", "logs"]),
+            ("session-b", false, &["main"]),
+        ]);
+        state.expanded_sessions.insert("session-a".to_string());
+        let rows = state.build_visible_rows();
+        // session-a + 2 tabs + session-b
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], TreeRow::Session(0)));
+        assert!(matches!(rows[1], TreeRow::Tab(0, 0)));
+        assert!(matches!(rows[2], TreeRow::Tab(0, 1)));
+        assert!(matches!(rows[3], TreeRow::Session(1)));
+    }
+
+    #[test]
+    fn test_visible_rows_empty() {
+        let state = State::default();
+        let rows = state.build_visible_rows();
+        assert!(rows.is_empty());
+    }
+
+    // --- clamp_cursor ---
+
+    #[test]
+    fn test_clamp_cursor_within_bounds() {
+        let mut state = make_state_with_sessions(&[
+            ("a", false, &[]),
+            ("b", false, &[]),
+        ]);
+        state.cursor = 1;
+        state.clamp_cursor();
+        assert_eq!(state.cursor, 1);
+    }
+
+    #[test]
+    fn test_clamp_cursor_beyond_end() {
+        let mut state = make_state_with_sessions(&[
+            ("a", false, &[]),
+            ("b", false, &[]),
+        ]);
+        state.cursor = 99;
+        state.clamp_cursor();
+        assert_eq!(state.cursor, 1); // 2 sessions, max index = 1
+    }
+
+    #[test]
+    fn test_clamp_cursor_empty_state() {
+        let mut state = State::default();
+        state.cursor = 5;
+        state.clamp_cursor();
+        assert_eq!(state.cursor, 0);
+    }
+
+    // --- ensure_cursor_visible ---
+
+    #[test]
+    fn test_ensure_cursor_visible_already_visible() {
+        let mut state = State::default();
+        state.cursor = 3;
+        state.scroll_offset = 0;
+        state.ensure_cursor_visible(10);
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_ensure_cursor_visible_above_viewport() {
+        let mut state = State::default();
+        state.cursor = 2;
+        state.scroll_offset = 5; // cursor is above
+        state.ensure_cursor_visible(10);
+        assert_eq!(state.scroll_offset, 2);
+    }
+
+    #[test]
+    fn test_ensure_cursor_visible_below_viewport() {
+        let mut state = State::default();
+        state.cursor = 15;
+        state.scroll_offset = 0;
+        state.ensure_cursor_visible(10); // viewport shows rows 0..9
+        assert_eq!(state.scroll_offset, 6); // 15 - (10 - 1)
+    }
+
+    #[test]
+    fn test_ensure_cursor_visible_zero_rows() {
+        let mut state = State::default();
+        state.cursor = 5;
+        state.scroll_offset = 0;
+        state.ensure_cursor_visible(0); // no-op
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    // --- cursor_session_index ---
+
+    #[test]
+    fn test_cursor_session_index_on_session_row() {
+        let mut state = make_state_with_sessions(&[
+            ("a", false, &[]),
+            ("b", false, &[]),
+        ]);
+        state.cursor = 0;
+        assert_eq!(state.cursor_session_index(), Some(0));
+        state.cursor = 1;
+        assert_eq!(state.cursor_session_index(), Some(1));
+    }
+
+    #[test]
+    fn test_cursor_session_index_on_tab_row() {
+        let mut state = make_state_with_sessions(&[
+            ("a", false, &["main", "logs"]),
+            ("b", false, &[]),
+        ]);
+        state.expanded_sessions.insert("a".to_string());
+        // rows: Session(0), Tab(0,0), Tab(0,1), Session(1)
+        state.cursor = 1; // Tab(0,0)
+        assert_eq!(state.cursor_session_index(), Some(0));
+        state.cursor = 2; // Tab(0,1)
+        assert_eq!(state.cursor_session_index(), Some(0));
+        state.cursor = 3; // Session(1)
+        assert_eq!(state.cursor_session_index(), Some(1));
+    }
+
+    #[test]
+    fn test_cursor_session_index_empty() {
+        let state = State::default();
+        assert_eq!(state.cursor_session_index(), None);
+    }
+
+    // --- apply_ai_states_from_output ---
+
+    #[test]
+    fn test_apply_ai_states_active() {
+        let mut state = State::default();
+        let output = b"my-session active 1700000000 0 claude\n";
+        state.apply_ai_states_from_output(output);
+        assert!(matches!(state.ai_states.get("my-session"), Some(AgentState::Active)));
+        assert_eq!(state.ai_state_since.get("my-session"), Some(&1700000000));
+        assert_eq!(state.ai_agent_name.get("my-session").map(|s| s.as_str()), Some("claude"));
+    }
+
+    #[test]
+    fn test_apply_ai_states_idle_with_duration() {
+        let mut state = State::default();
+        let output = b"work idle 1700000100 42 opencode\n";
+        state.apply_ai_states_from_output(output);
+        assert!(matches!(state.ai_states.get("work"), Some(AgentState::Idle)));
+        assert_eq!(state.ai_last_duration.get("work"), Some(&42));
+        assert_eq!(state.ai_agent_name.get("work").map(|s| s.as_str()), Some("opencode"));
+    }
+
+    #[test]
+    fn test_apply_ai_states_waiting() {
+        let mut state = State::default();
+        let output = b"session-x waiting 1700000200 0\n";
+        state.apply_ai_states_from_output(output);
+        assert!(matches!(state.ai_states.get("session-x"), Some(AgentState::Waiting)));
+    }
+
+    #[test]
+    fn test_apply_ai_states_unknown_skipped() {
+        let mut state = State::default();
+        let output = b"session-x unknown 0 0\n";
+        state.apply_ai_states_from_output(output);
+        assert!(state.ai_states.get("session-x").is_none());
+    }
+
+    #[test]
+    fn test_apply_ai_states_malformed_skipped() {
+        let mut state = State::default();
+        let output = b"only-one-field\n\n   \n";
+        state.apply_ai_states_from_output(output);
+        assert!(state.ai_states.is_empty());
+    }
+
+    #[test]
+    fn test_apply_ai_states_multiple_sessions() {
+        let mut state = State::default();
+        let output = b"sess-a active 100 0 claude\nsess-b idle 200 30\n";
+        state.apply_ai_states_from_output(output);
+        assert!(matches!(state.ai_states.get("sess-a"), Some(AgentState::Active)));
+        assert!(matches!(state.ai_states.get("sess-b"), Some(AgentState::Idle)));
+        assert_eq!(state.ai_last_duration.get("sess-b"), Some(&30));
     }
 }
