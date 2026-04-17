@@ -1,55 +1,21 @@
 use zellij_tile::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::Duration;
 
-// --- Zellij Emphasis Colors ---
-// color_range only supports indices 0-3 (four emphasis levels)
-// Actual colors depend on the user's Zellij theme
-//   0 = emphasis_0 (typically green)
-//   1 = emphasis_1 (typically cyan/blue)
-//   2 = emphasis_2 (typically red)
-//   3 = emphasis_3 (typically yellow/orange)
-
-// Zellij Text palette: 0=orange, 1=cyan, 2=green, 3=magenta
+// Zellij emphasis color indices (theme-dependent)
+//   0 = emphasis_0 (orange)
+//   1 = emphasis_1 (cyan)
+//   2 = emphasis_2 (green)
+//   3 = emphasis_3 (magenta)
 const COLOR_ORANGE: usize = 0;
 const COLOR_CYAN: usize = 1;
 const COLOR_GREEN: usize = 2;
 const COLOR_MAGENTA: usize = 3;
 
 const CMD_KEY: &str = "cmd";
-const CMD_SCAN_DIR: &str = "scan_dir";
-const CMD_SCAN_DIR_LABEL: &str = "scan_dir_label";
-const CMD_GIT_BRANCH: &str = "git_branch";
 const CMD_LOAD_AI: &str = "load_ai";
-const PROJECT_KEY: &str = "project";
-
-// --- Verbosity ---
-
-#[derive(Clone, PartialEq)]
-enum Verbosity {
-    Minimal,
-    Full,
-}
-
-impl Default for Verbosity {
-    fn default() -> Self {
-        Verbosity::Full
-    }
-}
 
 // --- Data Model ---
-
-#[derive(Clone, PartialEq)]
-enum SessionStatus {
-    Running {
-        is_current: bool,
-        tab_count: usize,
-        active_command: Option<String>,
-    },
-    Exited,
-    NotStarted,
-}
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,126 +32,72 @@ impl Default for AgentState {
     }
 }
 
-#[derive(Clone, Default)]
-struct AgentStatus {
-    state: AgentState,
-    last_tool: Option<String>,
-}
-
-#[derive(Clone, Default)]
-struct ProjectMetadata {
-    git_branch: Option<String>,
-    is_git_repo: Option<bool>, // None = unknown, Some(false) = not git, Some(true) = is git
-    agent: AgentStatus,
-    pills: BTreeMap<String, String>,
-    progress_pct: Option<u8>,
+#[derive(Clone)]
+struct TabNode {
+    index: usize,   // tab position for switch_session_with_focus
+    name: String,
+    is_active: bool,
+    pane_count: usize,
 }
 
 #[derive(Clone)]
-struct Project {
+struct SessionNode {
     name: String,
-    path: String,
-    scan_dir_label: String,
-    status: SessionStatus,
-    metadata: ProjectMetadata,
+    is_current: bool,
+    tabs: Vec<TabNode>,
 }
 
-enum RenderLine {
-    Header(String),
-    ProjectRow(usize),    // index into self.projects (name line)
-    ProjectDetail(usize), // index into self.projects (detail line: git branch, future metadata)
-    CardTop,              // ╭───────────────╮
-    CardBottom,           // ╰───────────────╯
-    CardDivider,          // ├───────────────┤ (shared border between cards)
+enum TreeRow {
+    Session(usize),        // sessions[si]
+    Tab(usize, usize),     // sessions[si].tabs[ti]
 }
 
-impl RenderLine {
-    fn project_index(&self) -> Option<usize> {
-        match self {
-            RenderLine::ProjectRow(idx) | RenderLine::ProjectDetail(idx) => Some(*idx),
-            RenderLine::Header(_) | RenderLine::CardTop | RenderLine::CardBottom | RenderLine::CardDivider => None,
-        }
-    }
-}
+// --- State ---
 
 struct State {
     permissions_granted: bool,
-    projects: Vec<Project>,
-    selected_index: usize, // index into filtered list
+    sessions: Vec<SessionNode>,
+    expanded_sessions: BTreeSet<String>,
+    cursor: usize,
     scroll_offset: usize,
     initial_load_complete: bool,
     is_focused: bool,
-    is_hidden: bool,
-    verbosity: Verbosity,
-
-    // Search + Browse mode
-    search_query: String,
-    browse_mode: bool, // true = browsing all projects to find/start one
-
-    // Discovery mode
-    scan_dirs: Vec<String>,
-    pending_scans: usize,
-    use_discovery: bool,
-    discovered_dirs: Vec<(String, String, String)>,  // (name, path, scan_dir_label)
-    scan_complete: bool,
-    has_session_data: bool,
-
-    // Layout for new sessions
     session_layout: Option<String>,
-
-    // Whether this instance owns keybinds (false for secondary instances in new tabs)
     is_primary: bool,
 
-    // Attention tracking — sessions that need user attention
+    // Attention and AI state — keyed by session name, survive SessionUpdate
     attention_sessions: BTreeSet<String>,
-
-    // Cached session statuses
-    cached_statuses: BTreeMap<String, SessionStatus>,
-
-    // Metadata polling
-    cached_metadata: BTreeMap<String, ProjectMetadata>,
-    pending_commands: usize,
-    poll_tick: usize,
-
-    // AI state — stored separately so SessionUpdate never wipes it
     ai_states: BTreeMap<String, AgentState>,
-    ai_state_since: BTreeMap<String, u64>, // unix timestamp when state started
-    ai_last_duration: BTreeMap<String, u64>, // seconds the last active turn lasted
-    ai_pane_count: BTreeMap<String, usize>,  // number of active AI panes per session
-    ai_agent_name: BTreeMap<String, String>, // agent name per session (e.g. "claude", "opencode")
+    ai_state_since: BTreeMap<String, u64>,
+    ai_last_duration: BTreeMap<String, u64>,
+    ai_pane_count: BTreeMap<String, usize>,
+    ai_agent_name: BTreeMap<String, String>,
+
+    // Pills and progress — keyed by session name
+    pills: BTreeMap<String, BTreeMap<String, String>>,
+    progress: BTreeMap<String, u8>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             permissions_granted: false,
-            projects: Vec::new(),
-            selected_index: 0,
+            sessions: Vec::new(),
+            expanded_sessions: BTreeSet::new(),
+            cursor: 0,
             scroll_offset: 0,
             initial_load_complete: false,
             is_focused: false,
-            is_hidden: false,
-            verbosity: Verbosity::default(),
-            search_query: String::new(),
-            browse_mode: false,
-            scan_dirs: Vec::new(),
-            pending_scans: 0,
-            use_discovery: false,
-            discovered_dirs: Vec::new(),
-            scan_complete: false,
-            has_session_data: false,
             session_layout: None,
             is_primary: true,
             attention_sessions: BTreeSet::new(),
-            cached_statuses: BTreeMap::new(),
-            cached_metadata: BTreeMap::new(),
-            pending_commands: 0,
-            poll_tick: 0,
             ai_states: BTreeMap::new(),
             ai_state_since: BTreeMap::new(),
             ai_last_duration: BTreeMap::new(),
             ai_pane_count: BTreeMap::new(),
             ai_agent_name: BTreeMap::new(),
+            pills: BTreeMap::new(),
+            progress: BTreeMap::new(),
         }
     }
 }
@@ -194,7 +106,6 @@ register_plugin!(State);
 
 // --- Helpers ---
 
-/// Parse "SESSION::AGENT" from pipe name suffix. Agent is optional (backward compat).
 fn parse_session_agent(rest: &str) -> (&str, Option<&str>) {
     if let Some(idx) = rest.find("::") {
         let agent = &rest[idx + 2..];
@@ -202,15 +113,6 @@ fn parse_session_agent(rest: &str) -> (&str, Option<&str>) {
     } else {
         (rest, None)
     }
-}
-
-fn path_to_label(path: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if path.starts_with(&home) {
-            return format!("~{}", &path[home.len()..]);
-        }
-    }
-    path.to_string()
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -224,143 +126,87 @@ fn expand_tilde(path: &str) -> String {
     }
 }
 
-fn extract_active_command(session: &SessionInfo) -> Option<String> {
-    session.tabs.iter()
-        .find(|t| t.active)
-        .and_then(|active_tab| {
-            session.panes.panes.get(&active_tab.position)
-                .and_then(|panes| {
-                    panes.iter()
-                        .find(|p| p.is_focused && !p.is_plugin && !p.is_suppressed)
-                        .and_then(|pane| {
-                            pane.terminal_command.as_ref()
-                                .map(|cmd| {
-                                    PathBuf::from(cmd)
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or(cmd)
-                                        .to_string()
-                                })
-                        })
-                })
-        })
-}
-
-/// Fuzzy subsequence match — all query chars must appear in order in the name
-fn fuzzy_matches(name: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    let name_lower = name.to_lowercase();
-    let mut name_chars = name_lower.chars();
-    for qc in query.to_lowercase().chars() {
-        loop {
-            match name_chars.next() {
-                Some(nc) if nc == qc => break,
-                Some(_) => continue,
-                None => return false,
-            }
-        }
-    }
-    true
-}
-
-fn render_progress_bar(pct: u8, width: usize) -> String {
-    let filled = ((pct as usize) * width) / 100;
-    let empty = width.saturating_sub(filled);
-    "━".repeat(filled) + &"░".repeat(empty)
-}
-
 // --- State Methods ---
 
 impl State {
-    /// Get indices into self.projects visible in current mode
-    fn filtered_indices(&self) -> Vec<usize> {
-        if self.use_discovery {
-            if self.browse_mode {
-                // Browse mode: all projects filtered by search, sorted by (scan_dir_label, name)
-                let mut indices: Vec<usize> = self.projects.iter().enumerate()
-                    .filter(|(_, p)| fuzzy_matches(&p.name, &self.search_query))
-                    .map(|(i, _)| i)
-                    .collect();
-                indices.sort_by(|&a, &b| {
-                    let pa = &self.projects[a];
-                    let pb = &self.projects[b];
-                    pa.scan_dir_label.cmp(&pb.scan_dir_label)
-                        .then(pa.name.to_lowercase().cmp(&pb.name.to_lowercase()))
-                });
-                indices
-            } else {
-                // Normal mode: only projects with active sessions, sorted by (scan_dir_label, name)
-                let mut indices: Vec<usize> = self.projects.iter().enumerate()
-                    .filter(|(_, p)| !matches!(p.status, SessionStatus::NotStarted))
-                    .map(|(i, _)| i)
-                    .collect();
-                indices.sort_by(|&a, &b| {
-                    let pa = &self.projects[a];
-                    let pb = &self.projects[b];
-                    pa.scan_dir_label.cmp(&pb.scan_dir_label)
-                        .then(pa.name.to_lowercase().cmp(&pb.name.to_lowercase()))
-                });
-                indices
+    fn rebuild_from_session_update(&mut self, sessions: &[SessionInfo]) {
+        let current_name = sessions.iter()
+            .find(|s| s.is_current_session)
+            .map(|s| s.name.clone());
+
+        self.sessions = sessions.iter().map(|s| {
+            let tabs = s.tabs.iter().enumerate().map(|(i, t)| TabNode {
+                index: i,
+                name: t.name.clone(),
+                is_active: t.active,
+                pane_count: s.panes.panes.get(&t.position).map(|p| p.len()).unwrap_or(0),
+            }).collect();
+            SessionNode {
+                name: s.name.clone(),
+                is_current: s.is_current_session,
+                tabs,
             }
+        }).collect();
+
+        // Sort: current session first, then alphabetical
+        self.sessions.sort_by(|a, b| {
+            b.is_current.cmp(&a.is_current)
+                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+
+        // Auto-expand current session
+        if let Some(name) = &current_name {
+            self.expanded_sessions.insert(name.clone());
+        }
+
+        // Prune expanded_sessions for gone sessions
+        let session_names: BTreeSet<String> = self.sessions.iter().map(|s| s.name.clone()).collect();
+        self.expanded_sessions.retain(|name| session_names.contains(name));
+        // Don't prune ai_states — stale entries for gone sessions are harmless,
+        // and SessionUpdate fires on every switch which could wipe pipe-delivered state.
+    }
+
+    fn build_visible_rows(&self) -> Vec<TreeRow> {
+        let mut rows = Vec::new();
+        for (si, session) in self.sessions.iter().enumerate() {
+            rows.push(TreeRow::Session(si));
+            if self.expanded_sessions.contains(&session.name) {
+                for ti in 0..session.tabs.len() {
+                    rows.push(TreeRow::Tab(si, ti));
+                }
+            }
+        }
+        rows
+    }
+
+    fn clamp_cursor(&mut self) {
+        let len = self.build_visible_rows().len();
+        if len == 0 {
+            self.cursor = 0;
         } else {
-            // Legacy mode: show all
-            (0..self.projects.len()).collect()
+            self.cursor = self.cursor.min(len - 1);
         }
     }
 
-    /// Resolve selected_index (into filtered list) to actual project index
-    fn selected_project_index(&self) -> Option<usize> {
-        let filtered = self.filtered_indices();
-        filtered.get(self.selected_index).copied()
-    }
-
-    fn activate_selected_project(&mut self) {
-        if let Some(idx) = self.selected_project_index() {
-            let project = &self.projects[idx];
-            // Clear attention when switching to a session
-            self.attention_sessions.remove(&project.name);
-            match &project.status {
-                SessionStatus::Running { .. } | SessionStatus::Exited => {
-                    switch_session(Some(&project.name));
-                }
-                SessionStatus::NotStarted => {
-                    if let Some(ref layout_path) = self.session_layout {
-                        switch_session_with_layout(
-                            Some(&project.name),
-                            LayoutInfo::File(layout_path.clone(), Default::default()),
-                            Some(PathBuf::from(&project.path)),
-                        );
-                    } else {
-                        switch_session_with_cwd(
-                            Some(&project.name),
-                            Some(PathBuf::from(&project.path)),
-                        );
-                    }
-                }
-            }
-            self.browse_mode = false;
-            self.search_query.clear();
-            self.selected_index = 0;
-            self.scroll_offset = 0;
-            set_selectable(false);
-            self.is_focused = false;
+    fn ensure_cursor_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        if self.cursor < self.scroll_offset {
+            self.scroll_offset = self.cursor;
+        }
+        if self.cursor >= self.scroll_offset + visible_rows {
+            self.scroll_offset = self.cursor.saturating_sub(visible_rows - 1);
         }
     }
 
-    fn kill_selected_session(&mut self) {
-        if let Some(idx) = self.selected_project_index() {
-            let project = &self.projects[idx];
-            match &project.status {
-                SessionStatus::Running { is_current: true, .. } => {
-                    eprintln!("Cannot kill current session '{}'", project.name);
-                }
-                SessionStatus::Running { is_current: false, .. } => {
-                    kill_sessions(&[project.name.clone()]);
-                }
-                _ => {}
-            }
+    /// Returns the session index the cursor is on (whether on a Session or Tab row).
+    fn cursor_session_index(&self) -> Option<usize> {
+        let rows = self.build_visible_rows();
+        match rows.get(self.cursor) {
+            Some(TreeRow::Session(si)) => Some(*si),
+            Some(TreeRow::Tab(si, _)) => Some(*si),
+            None => None,
         }
     }
 
@@ -389,483 +235,25 @@ keybinds {{
     }
 
     fn create_tab_with_sidebar(&self) {
-        // Use the session_layout file so new tabs match the user's default_tab_template.
-        // Hardcoding a layout string here forces specific plugin paths and is fragile;
-        // the layout file already describes the correct tab structure.
         if let Some(ref layout_path) = self.session_layout {
             new_tabs_with_layout_info(LayoutInfo::File(layout_path.clone(), Default::default()));
         } else {
-            // Fallback: plain tab when no session_layout is configured
             new_tabs_with_layout("layout { pane }");
         }
     }
 
     fn toggle_visibility(&mut self) {
         if self.is_focused {
-            self.search_query.clear();
-            self.browse_mode = false;
             set_selectable(false);
             self.is_focused = false;
-            eprintln!("Sidebar deactivated");
         } else {
             set_selectable(true);
             focus_plugin_pane(get_plugin_ids().plugin_id, false, false);
             self.is_focused = true;
-            eprintln!("Sidebar activated");
         }
-    }
-
-    // --- Discovery ---
-
-    fn trigger_scan(&mut self) {
-        self.discovered_dirs.clear();
-        self.scan_complete = false;
-        self.pending_scans = self.scan_dirs.len();
-        if self.pending_scans == 0 {
-            self.scan_complete = true;
-            return;
-        }
-        for dir in &self.scan_dirs {
-            let mut ctx = BTreeMap::new();
-            ctx.insert(CMD_KEY.to_string(), CMD_SCAN_DIR.to_string());
-            ctx.insert(CMD_SCAN_DIR_LABEL.to_string(), path_to_label(dir));
-            run_command(
-                &["find", dir, "-maxdepth", "1", "-mindepth", "1", "-type", "d", "-not", "-name", ".*"],
-                ctx,
-            );
-            eprintln!("Scanning directory: {}", dir);
-        }
-    }
-
-    fn rebuild_projects(&mut self) {
-        if !self.use_discovery {
-            return;
-        }
-
-        let selected_name = self.selected_project_index()
-            .map(|idx| self.projects[idx].name.clone());
-
-        self.projects = self.discovered_dirs.iter()
-            .map(|(name, path, label)| {
-                let status = self.cached_statuses
-                    .get(name)
-                    .cloned()
-                    .unwrap_or(SessionStatus::NotStarted);
-                let metadata = self.cached_metadata.get(name).cloned()
-                    .unwrap_or_default();
-                Project {
-                    name: name.clone(),
-                    path: path.clone(),
-                    scan_dir_label: label.clone(),
-                    status,
-                    metadata,
-                }
-            })
-            .collect();
-
-        self.projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
-        // Restore selection to same project name within filtered view
-        if let Some(name) = selected_name {
-            let filtered = self.filtered_indices();
-            if let Some(fi) = filtered.iter().position(|&i| self.projects[i].name == name) {
-                self.selected_index = fi;
-            }
-        }
-        self.clamp_selection();
-
-        if self.scan_complete && self.has_session_data {
-            self.initial_load_complete = true;
-        }
-    }
-
-    fn update_cached_statuses(
-        &mut self,
-        sessions: &[SessionInfo],
-        resurrectable: &[(String, Duration)],
-    ) {
-        self.cached_statuses.clear();
-        for session in sessions {
-            let tab_count = session.tabs.len();
-            let active_command = extract_active_command(session);
-            self.cached_statuses.insert(
-                session.name.clone(),
-                SessionStatus::Running {
-                    is_current: session.is_current_session,
-                    tab_count,
-                    active_command,
-                },
-            );
-        }
-        for (name, _) in resurrectable {
-            if !self.cached_statuses.contains_key(name) {
-                self.cached_statuses.insert(name.clone(), SessionStatus::Exited);
-            }
-        }
-    }
-
-    fn apply_cached_statuses(&mut self) {
-        for project in &mut self.projects {
-            project.status = self.cached_statuses
-                .get(&project.name)
-                .cloned()
-                .unwrap_or(SessionStatus::NotStarted);
-        }
-    }
-
-    fn poll_git_branches(&mut self) {
-        for project in &self.projects {
-            if !matches!(project.status, SessionStatus::Running { .. }) {
-                continue;
-            }
-            if project.path.is_empty() {
-                continue;
-            }
-            // Skip projects we know are not git repos (until session restarts)
-            if project.metadata.is_git_repo == Some(false) {
-                continue;
-            }
-            let mut ctx = BTreeMap::new();
-            ctx.insert(CMD_KEY.to_string(), CMD_GIT_BRANCH.to_string());
-            ctx.insert(PROJECT_KEY.to_string(), project.name.clone());
-            run_command_with_env_variables_and_cwd(
-                &["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                BTreeMap::new(),
-                PathBuf::from(&project.path),
-                ctx,
-            );
-            self.pending_commands += 1;
-        }
-        if self.pending_commands == 0 {
-            // No running projects to poll, re-arm timer immediately
-            set_timeout(10.0);
-        }
-    }
-
-    fn apply_cached_metadata(&mut self) {
-        let keys_with_agent: Vec<_> = self.cached_metadata.iter()
-            .filter(|(_, m)| !matches!(m.agent.state, AgentState::Unknown))
-            .map(|(k, m)| format!("{}={:?}", k, m.agent.state))
-            .collect();
-        if !keys_with_agent.is_empty() {
-            eprintln!("apply_cached_metadata: AI states in cache: {:?}", keys_with_agent);
-            let project_names: Vec<_> = self.projects.iter().map(|p| p.name.clone()).collect();
-            eprintln!("apply_cached_metadata: project names: {:?}", project_names);
-        }
-        for project in &mut self.projects {
-            if let Some(meta) = self.cached_metadata.get(&project.name) {
-                project.metadata = meta.clone();
-            }
-        }
-    }
-
-    fn handle_git_branch_result(
-        &mut self,
-        exit_code: Option<i32>,
-        stdout: &[u8],
-        context: &BTreeMap<String, String>,
-    ) -> bool {
-        if let Some(project_name) = context.get(PROJECT_KEY) {
-            let meta = self.cached_metadata.entry(project_name.clone()).or_default();
-            if exit_code == Some(0) {
-                let branch = String::from_utf8_lossy(stdout).trim().to_string();
-                meta.is_git_repo = Some(true);
-                let changed = meta.git_branch.as_ref() != Some(&branch);
-                meta.git_branch = Some(branch);
-                if changed {
-                    self.apply_cached_metadata();
-                }
-                return changed;
-            } else {
-                // Non-zero exit = not a git repo (or git not installed)
-                meta.is_git_repo = Some(false);
-                meta.git_branch = None;
-                return false;
-            }
-        }
-        false
-    }
-
-    fn clamp_selection(&mut self) {
-        let filtered_len = self.filtered_indices().len();
-        if filtered_len == 0 {
-            self.selected_index = 0;
-        } else {
-            self.selected_index = self.selected_index.min(filtered_len - 1);
-        }
-    }
-
-    fn build_render_lines(&self) -> Vec<RenderLine> {
-        let mut lines = Vec::new();
-        let filtered = self.filtered_indices();
-
-        // Render cards grouped by scan_dir_label (works for both browse and normal mode)
-        // filtered is already sorted by (scan_dir_label, name) from filtered_indices()
-        if !filtered.is_empty() {
-            let has_multiple_groups = {
-                let mut labels: Vec<&str> = filtered.iter()
-                    .map(|&i| self.projects[i].scan_dir_label.as_str())
-                    .collect();
-                labels.dedup();
-                labels.len() > 1
-            };
-
-            if self.browse_mode && !has_multiple_groups {
-                lines.push(RenderLine::Header("All projects".to_string()));
-            }
-
-            let total = filtered.len();
-            let mut current_label: Option<&str> = None;
-            let mut group_open = false;
-
-            for (fi, &i) in filtered.iter().enumerate() {
-                let project = &self.projects[i];
-                let label = project.scan_dir_label.as_str();
-
-                let group_changed = has_multiple_groups && current_label != Some(label);
-
-                if group_changed {
-                    if group_open {
-                        lines.push(RenderLine::CardBottom);
-                    }
-                    lines.push(RenderLine::Header(label.to_string()));
-                    lines.push(RenderLine::CardTop);
-                    current_label = Some(label);
-                    group_open = true;
-                } else if fi == 0 {
-                    lines.push(RenderLine::CardTop);
-                    group_open = true;
-                } else {
-                    lines.push(RenderLine::CardDivider);
-                }
-
-                lines.push(RenderLine::ProjectRow(i));
-
-                let multi_tab = matches!(project.status, SessionStatus::Running { tab_count, .. } if tab_count > 1);
-                let has_command = matches!(project.status, SessionStatus::Running { active_command: Some(_), .. });
-                let ai_state = self.ai_states.get(&project.name);
-                let has_claude = ai_state.is_some() && !matches!(ai_state, Some(AgentState::Unknown));
-                let has_pills = !project.metadata.pills.is_empty();
-                let has_progress = project.metadata.progress_pct.is_some();
-                if multi_tab || has_command || has_claude || has_pills || has_progress {
-                    lines.push(RenderLine::ProjectDetail(i));
-                }
-
-                let is_last = fi == total - 1;
-                let next_is_new_group = has_multiple_groups && filtered.get(fi + 1)
-                    .map(|&next_i| self.projects[next_i].scan_dir_label.as_str() != label)
-                    .unwrap_or(false);
-                if is_last || next_is_new_group {
-                    lines.push(RenderLine::CardBottom);
-                    group_open = false;
-                }
-            }
-        }
-
-        lines
-    }
-
-    fn ensure_selection_visible(&mut self, render_lines: &[RenderLine], visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        let selected_proj = self.selected_project_index();
-
-        // Find the first and last render line belonging to the selected project
-        let mut first_y: Option<usize> = None;
-        let mut last_y: Option<usize> = None;
-        for (y, line) in render_lines.iter().enumerate() {
-            if line.project_index() == selected_proj && selected_proj.is_some() {
-                if first_y.is_none() {
-                    first_y = Some(y);
-                }
-                last_y = Some(y);
-            }
-        }
-
-        if let (Some(first), Some(last)) = (first_y, last_y) {
-            // Scroll up if card starts above viewport
-            if first < self.scroll_offset {
-                self.scroll_offset = first;
-            }
-            // Scroll down if card ends below viewport
-            if last >= self.scroll_offset + visible_rows {
-                self.scroll_offset = last.saturating_sub(visible_rows - 1);
-            }
-        }
-    }
-
-    fn render_project_name_line(&self, project: &Project, is_selected: bool, cols: usize) -> Text {
-        let is_current_session = matches!(&project.status, SessionStatus::Running { is_current: true, .. });
-
-        // Determine icon + color based on state priority
-        // needs_attention: pipe-based (same session) OR state-file-based "waiting" (cross-session)
-        let ai_state = self.ai_states.get(&project.name);
-        let needs_attention = self.attention_sessions.contains(&project.name)
-            || matches!(ai_state, Some(AgentState::Waiting));
-        let (status_icon, dot_color) = if needs_attention {
-            ("!", COLOR_MAGENTA)      // ! = needs attention (magenta)
-        } else {
-            match ai_state {
-                Some(AgentState::Active) => ("▶", COLOR_GREEN),    // ▶ = Claude working (green)
-                Some(AgentState::Idle) => ("■", COLOR_CYAN),       // ■ = Claude stopped (cyan)
-                _ => ("·", COLOR_ORANGE),                          // · = no AI state
-            }
-        };
-
-        // Name line: "│ ✦ name                    │"
-        let content = format!(" {} {}", status_icon, project.name);
-        let inner_width = cols.saturating_sub(2);
-        let padded: String = if content.chars().count() > inner_width {
-            content.chars().take(inner_width.saturating_sub(1)).collect::<String>() + "…"
-        } else {
-            format!("{:<width$}", content, width = inner_width)
-        };
-        let display_line = format!("│{}│", padded);
-
-        let mut text = Text::new(&display_line);
-
-        if is_selected {
-            text = text.selected();
-        }
-
-        let line_len = display_line.chars().count();
-
-        // First color wins per character — apply most specific first
-        // Icon color (starts at char 2, length varies: "▶"=1, "??"=2, "!!"=2)
-        let icon_end = 2 + status_icon.chars().count();
-        text = text.color_range(dot_color, 2..icon_end);
-        // Borders (cyan to match Zellij frame)
-        text = text.color_range(COLOR_CYAN, 0..1);
-        text = text.color_range(COLOR_CYAN, line_len.saturating_sub(1)..line_len);
-
-        if is_current_session {
-            // Green the name text (after icon, before right border)
-            text = text.color_range(COLOR_GREEN, 4..line_len.saturating_sub(1));
-        } else if matches!(project.status, SessionStatus::NotStarted | SessionStatus::Exited) {
-            // Dim inactive projects — they're background context
-            text = text.color_range(COLOR_CYAN, 4..line_len.saturating_sub(1));
-        }
-        // Running non-current: name text stays default (full contrast, these matter)
-
-        text
-    }
-
-    fn render_detail_line(&self, project: &Project, is_selected: bool, cols: usize) -> Text {
-        let mut content = String::from("   "); // indent past dot, aligned under name
-        let mut segments: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, color) — indices relative to final display_line
-        let mut has_content = false;
-
-        // Order: claude indicator → active command → tab count
-
-        // Claude indicator — show for ANY session with AI state (not just current)
-        let ai_state = self.ai_states.get(&project.name);
-        if ai_state.is_some() && !matches!(ai_state, Some(AgentState::Unknown)) {
-            let count = self.ai_pane_count.get(&project.name).copied().unwrap_or(0);
-            let agent_name = self.ai_agent_name.get(&project.name).map(|s| s.as_str()).unwrap_or("agent");
-            eprintln!("render_detail[{}]: ai_state={:?} agent_name={:?} ai_agent_name_map_size={}", &project.name, ai_state, agent_name, self.ai_agent_name.len());
-            let prefix = if count > 1 { format!("{} x{}", agent_name, count) } else { agent_name.to_string() };
-            let label = if matches!(ai_state, Some(AgentState::Active)) {
-                let elapsed = self.format_elapsed(&project.name);
-                if elapsed.is_empty() { prefix } else { format!("{} · {}", prefix, elapsed) }
-            } else {
-                let dur = self.format_last_duration(&project.name);
-                if dur.is_empty() { prefix } else { format!("{} · took {}", prefix, dur) }
-            };
-            let detail_color = match ai_state.unwrap() {
-                AgentState::Active => COLOR_GREEN,
-                _ => COLOR_CYAN,
-            };
-            let start = content.chars().count() + 1; // +1 for left │
-            content.push_str(&label);
-            let end = content.chars().count() + 1;
-            segments.push((start, end, detail_color));
-            has_content = true;
-        } else if let SessionStatus::Running { active_command: Some(cmd), .. } = &project.status {
-            // Fallback: show active_command from Zellij API (any session)
-            if has_content { content.push_str(" · "); }
-            let start = content.chars().count() + 1;
-            content.push_str(cmd);
-            let end = content.chars().count() + 1;
-            segments.push((start, end, COLOR_ORANGE));
-            has_content = true;
-        }
-
-        // Tab count — only show when >1
-        if let SessionStatus::Running { tab_count, .. } = &project.status {
-            if *tab_count > 1 {
-                if has_content { content.push_str(" · "); }
-                content.push_str(&format!("{} tabs", tab_count));
-                has_content = true;
-            }
-        }
-
-        // Git branch — disabled for now, may return on a dedicated third line
-
-        // Pills: render as key:value pairs (limit to first 3)
-        for (key, value) in project.metadata.pills.iter().take(3) {
-            if has_content { content.push_str(" · "); }
-            content.push_str(&format!("{}:{}", key, value));
-            has_content = true;
-        }
-
-        // Progress bar: only render if there is room
-        if let Some(pct) = project.metadata.progress_pct {
-            let bar = render_progress_bar(pct, 7);
-            let progress_str = format!(" {} {}%", bar, pct);
-            if content.chars().count() + progress_str.chars().count() + 2 < cols {
-                if has_content { content.push_str("  "); }
-                content.push_str(&progress_str);
-            }
-        }
-
-        // Pad and wrap with borders: "│content          │"
-        let inner_width = cols.saturating_sub(2);
-        let padded: String = if content.chars().count() > inner_width {
-            content.chars().take(inner_width.saturating_sub(1)).collect::<String>() + "…"
-        } else {
-            format!("{:<width$}", content, width = inner_width)
-        };
-        let display_line = format!("│{}│", padded);
-
-        let mut text = Text::new(&display_line);
-
-        if is_selected {
-            text = text.selected();
-        }
-
-        let is_current_session = matches!(&project.status, SessionStatus::Running { is_current: true, .. });
-        let line_len = display_line.chars().count();
-
-        // First color wins — apply specific segments first, then borders
-        if is_current_session {
-            text = text.color_range(COLOR_GREEN, 1..line_len.saturating_sub(1));
-        } else {
-            // Colored segments first (e.g., active command in cyan)
-            for (start, end, color) in &segments {
-                if *end < line_len {
-                    text = text.color_range(*color, *start..*end);
-                }
-            }
-            // Detail text stays default (uncolored = theme foreground, naturally dimmer than names)
-        }
-        // Borders last (cyan to match Zellij frame)
-        text = text.color_range(COLOR_CYAN, 0..1);
-        text = text.color_range(COLOR_CYAN, line_len.saturating_sub(1)..line_len);
-
-        text
-    }
-
-    fn save_ai_states(&self) {
-        // No-op: hook script writes the shared files directly.
-        // Plugin only reads them via load_ai_states().
-        // Pipe messages handle instant in-memory updates for the current session.
     }
 
     fn load_ai_states(&mut self) {
-        // WASM filesystem access is sandboxed — use run_command to read state files on the host.
-        // Output format per line: "SESSION STATE TIMESTAMP DURATION [AGENT]"
-        // The shell aggregates per-session: hottest pane state wins.
         let script = r#"
 dir=/tmp/sidebar-ai
 [ -d "$dir" ] || exit 0
@@ -882,7 +270,6 @@ for session_dir in "$dir"/*/; do
     ts=$(echo "$line" | awk '{print $2}')
     dur=$(echo "$line" | awk '{print $3}')
     agent=$(echo "$line" | awk '{print $4}')
-    # Skip non-idle states whose file hasn't been touched in >5 min (killed agent)
     if [ "$state" != "idle" ]; then
       mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
       age=$((now - mtime))
@@ -912,11 +299,13 @@ done
     }
 
     fn apply_ai_states_from_output(&mut self, stdout: &[u8]) {
-        // Parse "SESSION STATE TIMESTAMP DURATION [AGENT]" lines from load_ai shell command
+        // Each line: "SESSION STATE TIMESTAMP DURATION [AGENT]"
         let output = String::from_utf8_lossy(stdout);
         for line in output.lines() {
             let parts: Vec<&str> = line.trim().split(' ').collect();
-            if parts.len() < 2 { continue; }
+            if parts.len() < 2 {
+                continue;
+            }
             let session = parts[0];
             let state = match parts.get(1).copied() {
                 Some("active") => AgentState::Active,
@@ -929,9 +318,15 @@ done
             let agent = parts.get(4).copied().unwrap_or("").trim();
 
             self.ai_states.insert(session.to_string(), state);
-            if ts > 0 { self.ai_state_since.insert(session.to_string(), ts); }
-            if dur > 0 { self.ai_last_duration.insert(session.to_string(), dur); }
-            if !agent.is_empty() { self.ai_agent_name.insert(session.to_string(), agent.to_string()); }
+            if ts > 0 {
+                self.ai_state_since.insert(session.to_string(), ts);
+            }
+            if dur > 0 {
+                self.ai_last_duration.insert(session.to_string(), dur);
+            }
+            if !agent.is_empty() {
+                self.ai_agent_name.insert(session.to_string(), agent.to_string());
+            }
         }
     }
 
@@ -968,150 +363,33 @@ done
             format!("{}h", secs / 3600)
         }
     }
-
-    /// Save a snapshot of project names+statuses so next load() can render instantly
-    fn save_snapshot(&self) {
-        let mut lines = Vec::new();
-        for p in &self.projects {
-            // Only snapshot running/exited — NotStarted are filtered out in default view
-            let status_tag = match &p.status {
-                SessionStatus::Running { is_current, .. } => {
-                    if *is_current { "current" } else { "running" }
-                }
-                SessionStatus::Exited => "exited",
-                SessionStatus::NotStarted => continue,
-            };
-            lines.push(format!("{}|{}|{}", p.name, p.path, status_tag));
-        }
-        let _ = std::fs::write("/tmp/sidebar-snapshot", lines.join("\n"));
-    }
-
-    /// Restore snapshot from previous session to avoid blank flash on load
-    fn restore_snapshot(&mut self) {
-        if let Ok(data) = std::fs::read_to_string("/tmp/sidebar-snapshot") {
-            let mut projects = Vec::new();
-            for line in data.lines() {
-                let parts: Vec<&str> = line.splitn(3, '|').collect();
-                if parts.len() < 3 { continue; }
-                let status = match parts[2] {
-                    "current" | "running" => SessionStatus::Running {
-                        is_current: false, // will be corrected by next SessionUpdate
-                        tab_count: 1,
-                        active_command: None,
-                    },
-                    "exited" => SessionStatus::Exited,
-                    _ => SessionStatus::NotStarted,
-                };
-                projects.push(Project {
-                    name: parts[0].to_string(),
-                    path: parts[1].to_string(),
-                    scan_dir_label: String::new(),
-                    status,
-                    metadata: ProjectMetadata::default(),
-                });
-            }
-            if !projects.is_empty() {
-                self.projects = projects;
-                self.initial_load_complete = true; // render immediately, no blank frame
-            }
-        }
-    }
 }
 
 // --- Plugin Lifecycle ---
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        if let Some(verbosity_str) = configuration.get("verbosity") {
-            self.verbosity = match verbosity_str.as_str() {
-                "minimal" => Verbosity::Minimal,
-                "full" => Verbosity::Full,
-                other => {
-                    eprintln!("WARNING: Unknown verbosity '{}', defaulting to 'full'", other);
-                    Verbosity::Full
-                }
-            };
-        }
-
-        if let Some(dir) = configuration.get("scan_dir") {
-            self.scan_dirs.push(expand_tilde(dir));
-        }
-        let mut scan_idx = 1usize;
-        while let Some(dir) = configuration.get(&format!("scan_dir_{}", scan_idx)) {
-            self.scan_dirs.push(expand_tilde(dir));
-            scan_idx += 1;
-        }
         self.session_layout = configuration.get("session_layout").map(|p| expand_tilde(p));
         self.is_primary = configuration.get("is_primary").map(|v| v != "false").unwrap_or(true);
-        self.use_discovery = !self.scan_dirs.is_empty();
 
-        if self.use_discovery {
-            eprintln!("Discovery mode: scan_dirs={:?}", self.scan_dirs);
-        } else {
-            let mut i = 0;
-            while let Some(path_str) = configuration.get(&format!("project_{}", i)) {
-                let path = PathBuf::from(path_str);
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                if path_str.starts_with('~') {
-                    eprintln!(
-                        "WARNING: project_{} uses tilde path '{}'. Use absolute paths.",
-                        i, path_str
-                    );
-                }
-
-                self.projects.push(Project {
-                    name,
-                    path: path_str.clone(),
-                    scan_dir_label: String::new(),
-                    status: SessionStatus::NotStarted,
-                    metadata: ProjectMetadata::default(),
-                });
-                i += 1;
-            }
-
-            let names: Vec<&str> = self.projects.iter().map(|p| p.name.as_str()).collect();
-            for (idx, name) in names.iter().enumerate() {
-                if names[idx + 1..].contains(name) {
-                    eprintln!(
-                        "WARNING: Duplicate project basename '{}'. Session matching will be ambiguous.",
-                        name
-                    );
-                }
-            }
-
-            eprintln!("Legacy mode: loaded {} projects", self.projects.len());
-        }
-
-        let permissions = vec![
+        request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::Reconfigure,
-            PermissionType::RunCommands, // Always needed for git polling
-        ];
-        request_permission(&permissions);
+            PermissionType::RunCommands,
+        ]);
 
-        let events = vec![
+        subscribe(&[
             EventType::SessionUpdate,
             EventType::PermissionRequestResult,
             EventType::Key,
             EventType::Mouse,
-            EventType::Timer,            // Needed for metadata polling
-            EventType::RunCommandResult, // Needed for git polling + discovery scan
-        ];
-        subscribe(&events);
+            EventType::Timer,
+            EventType::RunCommandResult,
+        ]);
 
-        // Ensure pane is focusable so user can accept the permissions dialog
         set_selectable(true);
-
-        // Restore previous state instantly to avoid blank flash on load
-        self.restore_snapshot();
         self.load_ai_states();
-
         eprintln!("Plugin loaded, requesting permissions");
     }
 
@@ -1123,412 +401,180 @@ impl ZellijPlugin for State {
                 if self.is_primary {
                     self.setup_toggle_keybind();
                 }
-                if self.use_discovery {
-                    self.trigger_scan();
-                }
-                // Start polling timer (first poll after 2 seconds)
                 set_timeout(2.0);
-                eprintln!("Permissions granted, sidebar set to unselectable, polling timer started");
+                eprintln!("Permissions granted");
                 true
             }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
                 eprintln!("Permissions denied — plugin cannot function");
                 false
             }
-            Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                match context.get(CMD_KEY).map(|s| s.as_str()) {
-                    Some(CMD_SCAN_DIR) => {
-                        if exit_code == Some(0) {
-                            let output = String::from_utf8_lossy(&stdout);
-                            let label = context.get(CMD_SCAN_DIR_LABEL).cloned().unwrap_or_default();
-                            self.discovered_dirs.extend(
-                                output
-                                    .lines()
-                                    .filter(|line| !line.is_empty())
-                                    .map(|full_path| {
-                                        let name = PathBuf::from(full_path)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or("unknown")
-                                            .to_string();
-                                        (name, full_path.to_string(), label.clone())
-                                    })
-                            );
-                            eprintln!("Discovered {} directories so far", self.discovered_dirs.len());
-                        } else {
-                            eprintln!(
-                                "scan_dir failed (exit {:?}): {}",
-                                exit_code,
-                                String::from_utf8_lossy(&stderr)
-                            );
-                        }
-                        if self.pending_scans > 0 {
-                            self.pending_scans -= 1;
-                        }
-                        if self.pending_scans == 0 {
-                            self.scan_complete = true;
-                            self.rebuild_projects();
-                        }
-                        true
-                    }
-                    Some(CMD_GIT_BRANCH) => {
-                        let changed = self.handle_git_branch_result(exit_code, &stdout, &context);
-                        if self.pending_commands > 0 {
-                            self.pending_commands -= 1;
-                        }
-                        // Re-arm timer when all results are in
-                        if self.pending_commands == 0 {
-                            eprintln!("All git commands complete, re-arming timer");
-                            set_timeout(10.0);
-                        }
-                        changed
-                    }
-                    Some(CMD_LOAD_AI) => {
-                        self.apply_ai_states_from_output(&stdout);
-                        true
-                    }
-                    _ => false,
+            Event::RunCommandResult(_, stdout, _, context) => {
+                if context.get(CMD_KEY).map(|s| s.as_str()) == Some(CMD_LOAD_AI) {
+                    self.apply_ai_states_from_output(&stdout);
+                    true
+                } else {
+                    false
                 }
             }
-            Event::SessionUpdate(sessions, resurrectable) => {
-                if self.use_discovery {
-                    self.update_cached_statuses(&sessions, &resurrectable);
-                    self.has_session_data = true;
+            Event::SessionUpdate(sessions, _resurrectable) => {
+                self.rebuild_from_session_update(&sessions);
+                self.load_ai_states();
 
-                    // Keep metadata for all known sessions (not just running)
-                    // AI state from pipe messages must survive SessionUpdate cycles
-                    let known_names: BTreeSet<String> = self.cached_statuses.keys().cloned().collect();
-                    self.cached_metadata.retain(|name, _| known_names.contains(name));
-                    // Do NOT retain ai_states/ai_agent_name here — SessionUpdate fires on every
-                    // session switch and can wipe pipe-delivered state before it re-arrives.
-                    // Stale entries for truly deleted sessions are harmless (they won't be in
-                    // discovered_dirs and won't render).
-                    self.load_ai_states();
-
-                    if self.scan_complete {
-                        self.apply_cached_statuses();
-                        self.apply_cached_metadata();
-                        self.initial_load_complete = true;
-                    } else {
-                        // Show live sessions immediately while scan runs in background.
-                        // Default view only shows Running/Exited, which we have from SessionUpdate.
-                        self.projects = self.cached_statuses.iter()
-                            .filter(|(_, status)| !matches!(status, SessionStatus::NotStarted))
-                            .map(|(name, status)| Project {
-                                name: name.clone(),
-                                path: String::new(),
-                                scan_dir_label: String::new(),
-                                status: status.clone(),
-                                metadata: ProjectMetadata::default(),
-                            })
-                            .collect();
-                        self.projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        self.apply_cached_metadata(); // Preserve AI state from pipe messages
-                        self.clamp_selection();
-                        self.initial_load_complete = true;
-                    }
-                } else {
-                    for project in &mut self.projects {
-                        if let Some(session) = sessions.iter().find(|s| s.name == project.name) {
-                            let tab_count = session.tabs.len();
-                            let active_command = extract_active_command(session);
-                            project.status = SessionStatus::Running {
-                                is_current: session.is_current_session,
-                                tab_count,
-                                active_command,
-                            };
-                        } else if resurrectable.iter().any(|(name, _)| name == &project.name) {
-                            project.status = SessionStatus::Exited;
-                        } else {
-                            project.status = SessionStatus::NotStarted;
-                        }
-                    }
-                    // Prune stale AI states for sessions that no longer exist
-                    let active_session_names: BTreeSet<String> = sessions.iter().map(|s| s.name.clone()).collect();
-                    let resurrectable_names: BTreeSet<String> = resurrectable.iter().map(|(n, _)| n.clone()).collect();
-                    self.ai_states.retain(|name, _| active_session_names.contains(name) || resurrectable_names.contains(name));
-                    self.initial_load_complete = true;
-                }
-                // Auto-track current session when sidebar is not actively navigated
+                // Auto-track cursor to current session when sidebar is not focused
                 if !self.is_focused {
-                    let filtered = self.filtered_indices();
-                    if let Some(fi) = filtered.iter().position(|&i| {
-                        matches!(self.projects[i].status, SessionStatus::Running { is_current: true, .. })
+                    let rows = self.build_visible_rows();
+                    if let Some(pos) = rows.iter().position(|r| {
+                        matches!(r, TreeRow::Session(si) if self.sessions[*si].is_current)
                     }) {
-                        self.selected_index = fi;
+                        self.cursor = pos;
                     }
                 }
-                // Cache project list so next load() can render instantly
-                self.save_snapshot();
+
+                self.clamp_cursor();
+                self.initial_load_complete = true;
                 true
             }
-            Event::Mouse(mouse) => {
-                match mouse {
-                    Mouse::LeftClick(line, _col) => {
-                        let click_y = line as usize;
-                        let y_offset: usize = if self.browse_mode { 1 } else { 0 };
-
-                        if click_y < y_offset {
-                            // Clicked on search bar — ignore
-                            return true;
-                        }
-
-                        let render_lines = self.build_render_lines();
-                        let render_idx = self.scroll_offset + (click_y - y_offset);
-
-                        if render_idx < render_lines.len() {
-                            if let Some(project_idx) = render_lines[render_idx].project_index() {
-                                let filtered = self.filtered_indices();
-                                if let Some(fi) = filtered.iter().position(|&i| i == project_idx) {
-                                    self.selected_index = fi;
-                                    self.activate_selected_project();
-                                }
-                            }
-                        }
-                        true
-                    }
-                    Mouse::ScrollUp(_) => {
-                        self.selected_index = self.selected_index.saturating_sub(1);
-                        true
-                    }
-                    Mouse::ScrollDown(_) => {
-                        let filtered_len = self.filtered_indices().len();
-                        if filtered_len > 0 {
-                            self.selected_index = (self.selected_index + 1)
-                                .min(filtered_len.saturating_sub(1));
-                        }
-                        true
-                    }
-                    _ => false,
-                }
+            Event::Timer(_) => {
+                self.load_ai_states();
+                set_timeout(10.0);
+                true
             }
             Event::Key(key) => match key.bare_key {
-                // --- Navigation (always works) ---
                 BareKey::Down if key.has_no_modifiers() => {
-                    let filtered_len = self.filtered_indices().len();
-                    if filtered_len > 0 {
-                        self.selected_index = (self.selected_index + 1)
-                            .min(filtered_len.saturating_sub(1));
+                    let len = self.build_visible_rows().len();
+                    if len > 0 {
+                        self.cursor = (self.cursor + 1).min(len - 1);
                     }
                     true
                 }
                 BareKey::Up if key.has_no_modifiers() => {
-                    self.selected_index = self.selected_index.saturating_sub(1);
+                    self.cursor = self.cursor.saturating_sub(1);
                     true
                 }
                 BareKey::Enter if key.has_no_modifiers() => {
-                    self.activate_selected_project();
+                    let rows = self.build_visible_rows();
+                    match rows.get(self.cursor) {
+                        Some(TreeRow::Session(si)) => {
+                            let name = self.sessions[*si].name.clone();
+                            self.attention_sessions.remove(&name);
+                            switch_session(Some(&name));
+                            set_selectable(false);
+                            self.is_focused = false;
+                        }
+                        Some(TreeRow::Tab(si, ti)) => {
+                            let name = self.sessions[*si].name.clone();
+                            let tab_idx = self.sessions[*si].tabs[*ti].index;
+                            self.attention_sessions.remove(&name);
+                            switch_session_with_focus(&name, Some(tab_idx), None);
+                            set_selectable(false);
+                            self.is_focused = false;
+                        }
+                        None => {}
+                    }
+                    true
+                }
+                BareKey::Delete if key.has_no_modifiers() => {
+                    if let Some(si) = self.cursor_session_index() {
+                        let session = &self.sessions[si];
+                        if !session.is_current {
+                            kill_sessions(&[session.name.clone()]);
+                        }
+                    }
                     true
                 }
                 BareKey::Esc if key.has_no_modifiers() => {
-                    if self.browse_mode {
-                        // Exit browse mode
-                        self.browse_mode = false;
-                        self.search_query.clear();
-                        self.selected_index = 0;
-                        self.scroll_offset = 0;
-                        eprintln!("Exited browse mode");
-                    } else {
-                        // Deactivate sidebar
-                        set_selectable(false);
-                        self.is_focused = false;
-                        eprintln!("Sidebar deactivated");
-                    }
+                    set_selectable(false);
+                    self.is_focused = false;
                     true
                 }
-                BareKey::Backspace if key.has_no_modifiers() => {
-                    if self.browse_mode && !self.search_query.is_empty() {
-                        self.search_query.pop();
-                        self.selected_index = 0;
-                        self.scroll_offset = 0;
-                    }
-                    true
-                }
-
-                // --- Commands ---
-                BareKey::Delete if key.has_no_modifiers() => {
-                    if !self.browse_mode {
-                        self.kill_selected_session();
-                    }
-                    true
-                }
-                BareKey::Char('r') if key.has_modifiers(&[KeyModifier::Alt]) => {
-                    if self.use_discovery {
-                        self.trigger_scan();
-                    }
-                    true
-                }
-
-                // --- `/` enters browse mode (discovery only) ---
-                BareKey::Char('/') if key.has_no_modifiers() && !self.browse_mode => {
-                    if self.use_discovery {
-                        self.browse_mode = true;
-                        self.search_query.clear();
-                        self.selected_index = 0;
-                        self.scroll_offset = 0;
-                        eprintln!("Entered browse mode");
-                    }
-                    true
-                }
-
-                // --- Search typing (browse mode only) ---
-                BareKey::Char(c) if key.has_no_modifiers() && self.browse_mode => {
-                    self.search_query.push(c);
-                    self.selected_index = 0;
-                    self.scroll_offset = 0;
-                    true
-                }
-
                 _ => false,
             },
-            Event::Timer(_elapsed) => {
-                // Refresh cross-session AI state from /cache on every tick
-                self.load_ai_states();
-                if self.pending_commands == 0 {
-                    self.poll_tick += 1;
-                    self.poll_git_branches();
-                    eprintln!("Poll tick {} -- dispatched git commands (pending: {})", self.poll_tick, self.pending_commands);
-                } else {
-                    // Commands still pending from last cycle, skip this tick
-                    eprintln!("Poll tick skipped -- {} commands still pending", self.pending_commands);
+            Event::Mouse(mouse) => match mouse {
+                Mouse::ScrollUp(_) => {
+                    self.cursor = self.cursor.saturating_sub(1);
+                    true
                 }
-                true // re-render to show updated cross-session AI state
-            }
+                Mouse::ScrollDown(_) => {
+                    let len = self.build_visible_rows().len();
+                    if len > 0 {
+                        self.cursor = (self.cursor + 1).min(len - 1);
+                    }
+                    true
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
-        if !self.permissions_granted && !self.initial_load_complete {
-            return; // No permissions yet AND no snapshot — render nothing
-        }
-
-        if self.projects.is_empty() {
-            return; // Render nothing — SessionUpdate will populate shortly
-        }
-
-        let mut y_offset: usize = 0;
-
-        // Search bar (browse mode)
-        if self.browse_mode {
-            let search_line = if self.search_query.is_empty() {
-                " / search...".to_string()
-            } else {
-                format!(" / {}", self.search_query)
-            };
-            let display: String = if search_line.chars().count() > cols {
-                search_line.chars().take(cols).collect()
-            } else {
-                search_line
-            };
-            let text = Text::new(&display).color_range(COLOR_CYAN, 0..display.chars().count());
-            print_text_with_coordinates(text, 0, 0, Some(cols), None);
-            y_offset = 1;
-        }
-
-        let render_lines = self.build_render_lines();
-
-        // Empty states
-        if render_lines.is_empty() {
-            if !self.browse_mode {
-                return; // Render nothing — sessions will appear on next SessionUpdate
-            }
-            let text = Text::new(" No matches").color_all(COLOR_CYAN);
-            print_text_with_coordinates(text, 0, y_offset, Some(cols), None);
-
-            // Still show footer with hint
-            let footer_y = rows.saturating_sub(1);
-            if footer_y > y_offset {
-                let hint = if self.is_focused && self.use_discovery {
-                    " /:browse"
-                } else if !self.is_focused {
-                    " ⌘O to toggle"
-                } else {
-                    ""
-                };
-                if !hint.is_empty() {
-                    let hint_text = Text::new(hint).color_all(COLOR_CYAN);
-                    print_text_with_coordinates(hint_text, 0, footer_y, Some(cols), None);
-                }
-            }
+        if !self.initial_load_complete {
             return;
         }
 
-        let content_area = rows.saturating_sub(1).saturating_sub(y_offset); // reserve footer + search bar
+        let visible = self.build_visible_rows();
+        if visible.is_empty() {
+            return;
+        }
 
-        self.ensure_selection_visible(&render_lines, content_area);
+        let content_rows = rows.saturating_sub(1); // reserve footer row
+        self.ensure_cursor_visible(content_rows);
 
-        let visible_end = (self.scroll_offset + content_area).min(render_lines.len());
-
-        for (i, line_idx) in (self.scroll_offset..visible_end).enumerate() {
-            let screen_y = i + y_offset;
-            match &render_lines[line_idx] {
-                RenderLine::Header(title) => {
-                    let header = format!(" ─ {}", title);
-                    let header_line: String = if header.chars().count() > cols {
-                        header.chars().take(cols).collect()
+        let end = (self.scroll_offset + content_rows).min(visible.len());
+        for (i, row_idx) in (self.scroll_offset..end).enumerate() {
+            let is_selected = row_idx == self.cursor;
+            let text = match &visible[row_idx] {
+                TreeRow::Session(si) => {
+                    let s = &self.sessions[*si];
+                    let expand = if self.expanded_sessions.contains(&s.name) { "▼" } else { "▶" };
+                    let current_marker = if s.is_current { "*" } else { " " };
+                    let line = format!("{}{} {}", expand, current_marker, s.name);
+                    let line_clipped: String = line.chars().take(cols).collect();
+                    let mut t = Text::new(&line_clipped);
+                    if is_selected {
+                        t = t.selected();
+                    }
+                    if s.is_current {
+                        t = t.color_range(COLOR_GREEN, 0..line_clipped.chars().count());
+                    }
+                    t
+                }
+                TreeRow::Tab(si, ti) => {
+                    let s = &self.sessions[*si];
+                    let tab = &s.tabs[*ti];
+                    let connector = if *ti == s.tabs.len() - 1 { "└" } else { "├" };
+                    let dot = if tab.is_active { "●" } else { "○" };
+                    let pane_suffix = if tab.pane_count > 1 {
+                        format!(" [{}]", tab.pane_count)
                     } else {
-                        header
+                        String::new()
                     };
-                    let text = Text::new(&header_line).color_all(COLOR_CYAN);
-                    print_text_with_coordinates(text, 0, screen_y, Some(cols), None);
+                    let line = format!("  {} {} {}{}", connector, dot, tab.name, pane_suffix);
+                    let line_clipped: String = line.chars().take(cols).collect();
+                    let mut t = Text::new(&line_clipped);
+                    if is_selected {
+                        t = t.selected();
+                    }
+                    if tab.is_active {
+                        // Color the active dot green (char at index 4)
+                        t = t.color_range(COLOR_GREEN, 4..5);
+                    }
+                    t
                 }
-                RenderLine::ProjectRow(project_idx) => {
-                    let project = &self.projects[*project_idx];
-                    let is_selected = self.selected_project_index() == Some(*project_idx);
-                    let text = self.render_project_name_line(project, is_selected, cols);
-                    print_text_with_coordinates(text, 0, screen_y, Some(cols), None);
-                }
-                RenderLine::ProjectDetail(project_idx) => {
-                    let project = &self.projects[*project_idx];
-                    let is_selected = self.selected_project_index() == Some(*project_idx);
-                    let text = self.render_detail_line(project, is_selected, cols);
-                    print_text_with_coordinates(text, 0, screen_y, Some(cols), None);
-                }
-                RenderLine::CardTop => {
-                    let inner_width = cols.saturating_sub(2);
-                    let rule = format!("╭{}╮", "─".repeat(inner_width));
-                    let display: String = rule.chars().take(cols).collect();
-                    let text = Text::new(&display).color_all(COLOR_CYAN);
-                    print_text_with_coordinates(text, 0, screen_y, Some(cols), None);
-                }
-                RenderLine::CardBottom => {
-                    let inner_width = cols.saturating_sub(2);
-                    let rule = format!("╰{}╯", "─".repeat(inner_width));
-                    let display: String = rule.chars().take(cols).collect();
-                    let text = Text::new(&display).color_all(COLOR_CYAN);
-                    print_text_with_coordinates(text, 0, screen_y, Some(cols), None);
-                }
-                RenderLine::CardDivider => {
-                    let inner_width = cols.saturating_sub(2);
-                    let rule = format!("├{}┤", "─".repeat(inner_width));
-                    let display: String = rule.chars().take(cols).collect();
-                    let text = Text::new(&display).color_all(COLOR_CYAN);
-                    print_text_with_coordinates(text, 0, screen_y, Some(cols), None);
-                }
-            }
+            };
+            print_text_with_coordinates(text, 0, i, Some(cols), None);
         }
 
-        // Footer — pinned to bottom
+        // Footer hint — pinned to bottom
         let footer_y = rows.saturating_sub(1);
-        if footer_y > 0 {
-            let hint = if !self.is_focused {
-                " ⌘O to toggle"
-            } else if self.browse_mode {
-                " ↵:open esc:back"
-            } else if self.use_discovery {
-                " ↵:go /:browse del:kill"
-            } else {
-                " ↵:switch del:kill"
-            };
-            let hint_line: String = if hint.chars().count() > cols {
-                hint.chars().take(cols).collect()
-            } else {
-                hint.to_string()
-            };
-            let hint_text = Text::new(&hint_line).color_all(COLOR_CYAN);
-            print_text_with_coordinates(hint_text, 0, footer_y, Some(cols), None);
-        }
+        let hint = if !self.is_focused {
+            " ⌘O to toggle"
+        } else {
+            " ↑↓:nav ↵:switch del:kill esc:exit"
+        };
+        let hint_text = Text::new(hint).color_all(COLOR_CYAN);
+        print_text_with_coordinates(hint_text, 0, footer_y, Some(cols), None);
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
@@ -1559,11 +605,9 @@ impl ZellijPlugin for State {
                 set_selectable(true);
                 show_self(false);
                 self.is_focused = true;
-                self.is_hidden = false;
                 eprintln!("Sidebar activated via pipe (legacy focus_sidebar)");
                 true
             }
-            // sidebar::ai-active::{session}::{agent} (agent optional for backward compat)
             name if name.starts_with("sidebar::ai-active::") => {
                 let rest = name.strip_prefix("sidebar::ai-active::").unwrap_or("");
                 let (session, agent) = parse_session_agent(rest);
@@ -1572,8 +616,9 @@ impl ZellijPlugin for State {
                         self.ai_state_since.insert(session.to_string(), self.now_secs());
                     }
                     self.ai_states.insert(session.to_string(), AgentState::Active);
-                    if let Some(a) = agent { self.ai_agent_name.insert(session.to_string(), a.to_string()); }
-                    self.save_ai_states();
+                    if let Some(a) = agent {
+                        self.ai_agent_name.insert(session.to_string(), a.to_string());
+                    }
                 }
                 true
             }
@@ -1583,8 +628,9 @@ impl ZellijPlugin for State {
                 if !session.is_empty() {
                     self.ai_state_since.insert(session.to_string(), self.now_secs());
                     self.ai_states.insert(session.to_string(), AgentState::Idle);
-                    if let Some(a) = agent { self.ai_agent_name.insert(session.to_string(), a.to_string()); }
-                    self.save_ai_states();
+                    if let Some(a) = agent {
+                        self.ai_agent_name.insert(session.to_string(), a.to_string());
+                    }
                 }
                 true
             }
@@ -1594,8 +640,9 @@ impl ZellijPlugin for State {
                 if !session.is_empty() {
                     self.ai_state_since.insert(session.to_string(), self.now_secs());
                     self.ai_states.insert(session.to_string(), AgentState::Waiting);
-                    if let Some(a) = agent { self.ai_agent_name.insert(session.to_string(), a.to_string()); }
-                    self.save_ai_states();
+                    if let Some(a) = agent {
+                        self.ai_agent_name.insert(session.to_string(), a.to_string());
+                    }
                 }
                 true
             }
@@ -1604,10 +651,8 @@ impl ZellijPlugin for State {
                 let key = pipe_message.args.get("key").cloned();
                 let value = pipe_message.args.get("value").cloned();
                 if let (Some(session), Some(key), Some(value)) = (session, key, value) {
-                    let meta = self.cached_metadata.entry(session.clone()).or_default();
-                    meta.pills.insert(key.clone(), value.clone());
+                    self.pills.entry(session.clone()).or_default().insert(key.clone(), value.clone());
                     eprintln!("Pill set: {}={} for {}", key, value, session);
-                    self.apply_cached_metadata();
                     true
                 } else {
                     false
@@ -1615,15 +660,13 @@ impl ZellijPlugin for State {
             }
             "sidebar::pill-clear" => {
                 if let Some(session) = pipe_message.args.get("session").cloned() {
-                    let meta = self.cached_metadata.entry(session.clone()).or_default();
                     if let Some(key) = pipe_message.args.get("key") {
-                        meta.pills.remove(key);
+                        self.pills.entry(session.clone()).or_default().remove(key);
                         eprintln!("Pill cleared: {} for {}", key, session);
                     } else {
-                        meta.pills.clear();
+                        self.pills.remove(&session);
                         eprintln!("All pills cleared for {}", session);
                     }
-                    self.apply_cached_metadata();
                     true
                 } else {
                     false
@@ -1634,10 +677,12 @@ impl ZellijPlugin for State {
                 let pct_str = pipe_message.args.get("pct").cloned();
                 if let (Some(session), Some(pct_str)) = (session, pct_str) {
                     if let Ok(pct) = pct_str.parse::<u8>() {
-                        let meta = self.cached_metadata.entry(session.clone()).or_default();
-                        meta.progress_pct = if pct == 0 { None } else { Some(pct.min(100)) };
+                        if pct == 0 {
+                            self.progress.remove(&session);
+                        } else {
+                            self.progress.insert(session.clone(), pct.min(100));
+                        }
                         eprintln!("Progress set: {}% for {}", pct, session);
-                        self.apply_cached_metadata();
                         true
                     } else {
                         false
@@ -1648,10 +693,8 @@ impl ZellijPlugin for State {
             }
             "sidebar::progress-clear" => {
                 if let Some(session) = pipe_message.args.get("session").cloned() {
-                    let meta = self.cached_metadata.entry(session.clone()).or_default();
-                    meta.progress_pct = None;
+                    self.progress.remove(&session);
                     eprintln!("Progress cleared for {}", session);
-                    self.apply_cached_metadata();
                     true
                 } else {
                     false
