@@ -1,5 +1,6 @@
 use zellij_tile::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 // Zellij emphasis color indices (theme-dependent)
 //   0 = emphasis_0 (orange)
