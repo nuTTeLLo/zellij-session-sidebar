@@ -1,6 +1,5 @@
 use zellij_tile::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 // Zellij emphasis color indices (theme-dependent)
 //   0 = emphasis_0 (orange)
@@ -39,7 +38,6 @@ pub struct TabNode {
     pub index: usize,   // tab position for switch_session_with_focus
     pub name: String,
     pub is_active: bool,
-    pub pane_count: usize,
 }
 
 #[derive(Clone)]
@@ -69,6 +67,8 @@ pub struct State {
     pub toggle_key: String,    // e.g. "Ctrl o" or "Super o"
     pub new_tab_key: String,   // e.g. "Ctrl t"
     pub hint: Option<String>,  // custom footer hint when unfocused
+    pub is_hidden: bool,    // true while sidebar is hidden
+    pub last_cols: usize,   // last known cols from render()
 
     // Attention and AI state — keyed by session name, survive SessionUpdate
     pub attention_sessions: BTreeSet<String>,
@@ -99,6 +99,8 @@ impl Default for State {
             toggle_key: "o".to_string(),
             new_tab_key: "Ctrl t".to_string(),
             hint: None,
+            is_hidden: false,
+            last_cols: 0,
             attention_sessions: BTreeSet::new(),
             ai_states: BTreeMap::new(),
             ai_state_since: BTreeMap::new(),
@@ -112,6 +114,22 @@ impl Default for State {
 }
 
 // --- Helpers ---
+
+/// Parse hint string into (key, label) pairs.
+/// Input format: "^O,o sidebar  ^O,w sessions  ^O,f favs"
+/// Output: [("o", "sidebar"), ("w", "sessions"), ("f", "favs")]
+pub fn parse_hint_items(hint: &str) -> Vec<(String, String)> {
+    hint.split("  ")
+        .filter_map(|item| {
+            let item = item.trim();
+            let rest = item.strip_prefix("^O,").unwrap_or(item);
+            let mut parts = rest.splitn(2, ' ');
+            let key = parts.next().filter(|s| !s.is_empty())?.to_string();
+            let label = parts.next().unwrap_or("").trim().to_string();
+            Some((key, label))
+        })
+        .collect()
+}
 
 pub fn parse_session_agent(rest: &str) -> (&str, Option<&str>) {
     if let Some(idx) = rest.find("::") {
@@ -146,7 +164,6 @@ impl State {
                 index: i,
                 name: t.name.clone(),
                 is_active: t.active,
-                pane_count: s.panes.panes.get(&t.position).map(|p| p.len()).unwrap_or(0),
             }).collect();
             SessionNode {
                 name: s.name.clone(),
@@ -337,8 +354,8 @@ done
         let plugin_id = get_plugin_ids().plugin_id;
         let toggle_key = &self.toggle_key;
         let new_tab_key = &self.new_tab_key;
-        // Toggle is bound in session mode (reached via Ctrl+O prefix),
-        // so the full sequence is e.g. Ctrl+O → o.
+        // Toggle focus is bound in session mode (Ctrl+O → key).
+        // Hide/show is bound globally so it works from any mode.
         // New tab is bound in shared mode as it's a creation action.
         let config = format!(
             r#"
@@ -349,6 +366,13 @@ keybinds {{
                 name "toggle_sidebar"
             }}
             SwitchToMode "Normal"
+        }}
+    }}
+    shared_except "locked" {{
+        bind "Ctrl /" {{
+            MessagePluginId {plugin_id} {{
+                name "hide_sidebar"
+            }}
         }}
     }}
     shared {{
@@ -373,14 +397,47 @@ keybinds {{
         }
     }
 
-    fn toggle_visibility(&mut self) {
+    fn toggle_focus(&mut self) {
         if self.is_focused {
             set_selectable(false);
             self.is_focused = false;
-        } else {
+        } else if !self.is_hidden {
             set_selectable(true);
             focus_plugin_pane(get_plugin_ids().plugin_id, false, false);
             self.is_focused = true;
+        }
+    }
+
+
+    fn toggle_hide(&mut self) {
+        if self.is_focused {
+            set_selectable(false);
+            self.is_focused = false;
+        }
+        if self.is_hidden {
+            if let Some(ref layout_path) = self.session_layout {
+                // First unsuppress ourselves so override_layout can match us to the sidebar slot
+                show_self(false);
+                // Then re-apply the session layout to fix positioning at 10% left.
+                // retain_plugins=true: existing tab-bar, status-bar, and sidebar are reused
+                // (no duplicates since we're unsuppressed and matchable).
+                eprintln!("Showing sidebar via show_self + override_layout: {}", layout_path);
+                override_layout(
+                    LayoutInfo::File(layout_path.clone(), Default::default()),
+                    true,  // retain_existing_terminal_panes
+                    true,  // retain_existing_plugin_panes
+                    true,  // apply_only_to_active_tab
+                    BTreeMap::new(),
+                );
+                // Ensure sidebar is not focusable/navigable as a regular pane
+                set_selectable(false);
+            }
+            self.is_hidden = false;
+        } else {
+            // Suppress the sidebar pane — it vanishes, other panes expand to fill.
+            // Tab bar, status bar, and terminal panes are completely untouched.
+            hide_self();
+            self.is_hidden = true;
         }
     }
 }
@@ -516,6 +573,36 @@ impl ZellijPlugin for State {
                     }
                     true
                 }
+                BareKey::Right if key.has_no_modifiers() => {
+                    let si = match self.build_visible_rows().get(self.cursor) {
+                        Some(TreeRow::Session(si)) => Some(*si),
+                        _ => None,
+                    };
+                    if let Some(si) = si {
+                        let name = self.sessions[si].name.clone();
+                        self.expanded_sessions.insert(name);
+                    }
+                    true
+                }
+                BareKey::Left if key.has_no_modifiers() => {
+                    let target = match self.build_visible_rows().get(self.cursor) {
+                        Some(TreeRow::Session(si)) => Some((*si, false)),
+                        Some(TreeRow::Tab(si, _)) => Some((*si, true)),
+                        None => None,
+                    };
+                    if let Some((si, is_tab)) = target {
+                        let name = self.sessions[si].name.clone();
+                        self.expanded_sessions.remove(&name);
+                        if is_tab {
+                            // Move cursor up to the parent session row
+                            let new_rows = self.build_visible_rows();
+                            if let Some(pos) = new_rows.iter().position(|r| matches!(r, TreeRow::Session(i) if *i == si)) {
+                                self.cursor = pos;
+                            }
+                        }
+                    }
+                    true
+                }
                 BareKey::Esc if key.has_no_modifiers() => {
                     set_selectable(false);
                     self.is_focused = false;
@@ -542,6 +629,12 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        self.last_cols = cols;
+
+        if self.is_hidden {
+            return;
+        }
+
         if !self.initial_load_complete {
             return;
         }
@@ -551,11 +644,32 @@ impl ZellijPlugin for State {
             return;
         }
 
-        let content_rows = rows.saturating_sub(1); // reserve footer row
+        // Footer height: stacked ^O + |-key lines when unfocused with hint, else 1
+        let footer_items: Vec<(String, String)> = if !self.is_focused {
+            let raw = self.hint.as_deref().unwrap_or("^O,o to toggle");
+            parse_hint_items(raw)
+        } else {
+            vec![]
+        };
+        let footer_height = if !self.is_focused {
+            1 + footer_items.len()
+        } else {
+            1
+        };
+        // Title row + content + footer
+        let title_height = 1;
+        let content_rows = rows.saturating_sub(footer_height + title_height);
         self.ensure_cursor_visible(content_rows);
+
+        // Title row (replaces border name since pane is borderless)
+        let title = "Sessions";
+        let title_clipped: String = title.chars().take(cols).collect();
+        let title_text = Text::new(&title_clipped).color_all(COLOR_CYAN);
+        print_text_with_coordinates(title_text, 0, 0, Some(cols), None);
 
         let end = (self.scroll_offset + content_rows).min(visible.len());
         for (i, row_idx) in (self.scroll_offset..end).enumerate() {
+            let i = i + title_height; // offset below title row
             let is_selected = row_idx == self.cursor;
             let text = match &visible[row_idx] {
                 TreeRow::Session(si) => {
@@ -578,12 +692,7 @@ impl ZellijPlugin for State {
                     let tab = &s.tabs[*ti];
                     let connector = if *ti == s.tabs.len() - 1 { "└" } else { "├" };
                     let dot = if tab.is_active { "●" } else { "○" };
-                    let pane_suffix = if tab.pane_count > 1 {
-                        format!(" [{}]", tab.pane_count)
-                    } else {
-                        String::new()
-                    };
-                    let line = format!("  {} {} {}{}", connector, dot, tab.name, pane_suffix);
+                    let line = format!("  {} {} {}", connector, dot, tab.name);
                     let line_clipped: String = line.chars().take(cols).collect();
                     let mut t = Text::new(&line_clipped);
                     if is_selected {
@@ -600,22 +709,32 @@ impl ZellijPlugin for State {
         }
 
         // Footer hint — pinned to bottom
-        let footer_y = rows.saturating_sub(1);
-        let default_unfocused = " ^O,o to toggle";
-        let unfocused_hint = self.hint.as_deref().unwrap_or(default_unfocused);
-        let hint = if !self.is_focused {
-            unfocused_hint
+        let footer_start = rows.saturating_sub(footer_height);
+        if !self.is_focused {
+            // First line: "^O"
+            let header = Text::new(" ^O").color_all(COLOR_CYAN);
+            print_text_with_coordinates(header, 0, footer_start, Some(cols), None);
+            // Subsequent lines: " |-key label"
+            for (i, (key, label)) in footer_items.iter().enumerate() {
+                let line = format!(" |-{} {}", key, label);
+                let line_clipped: String = line.chars().take(cols).collect();
+                let t = Text::new(&line_clipped).color_all(COLOR_CYAN);
+                print_text_with_coordinates(t, 0, footer_start + 1 + i, Some(cols), None);
+            }
         } else {
-            " ↑↓:nav ↵:switch del:kill esc:exit"
-        };
-        let hint_text = Text::new(hint).color_all(COLOR_CYAN);
-        print_text_with_coordinates(hint_text, 0, footer_y, Some(cols), None);
+            let hint_text = Text::new(" ↑↓:nav ↵:switch del:kill esc:exit").color_all(COLOR_CYAN);
+            print_text_with_coordinates(hint_text, 0, footer_start, Some(cols), None);
+        }
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         match pipe_message.name.as_str() {
             "toggle_sidebar" => {
-                self.toggle_visibility();
+                self.toggle_focus();
+                true
+            }
+            "hide_sidebar" => {
+                self.toggle_hide();
                 true
             }
             "new_tab_with_sidebar" => {
@@ -776,7 +895,6 @@ mod tests {
                     index: ti,
                     name: tname.to_string(),
                     is_active: ti == 0,
-                    pane_count: 1,
                 }).collect(),
             }
         }).collect();
