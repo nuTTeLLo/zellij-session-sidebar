@@ -217,6 +217,16 @@ impl State {
         }
     }
 
+    /// Returns the name of the session at the current cursor position.
+    /// Panics if the cursor is out of bounds or points at a tab row.
+    pub fn current_session_name(&self) -> &str {
+        let rows = self.build_visible_rows();
+        match rows[self.cursor] {
+            TreeRow::Session(si) => &self.sessions[si].name,
+            TreeRow::Tab(_, _) => panic!("cursor is on a tab, not a session"),
+        }
+    }
+
     pub fn ensure_cursor_visible(&mut self, visible_rows: usize) {
         if visible_rows == 0 {
             return;
