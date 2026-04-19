@@ -120,18 +120,14 @@ impl Default for State {
 /// Input format: "^O,o sidebar  ^O,w sessions  ^O,f favs"
 /// Output: [("o", "sidebar"), ("w", "sessions"), ("f", "favs")]
 pub fn parse_hint_items(hint: &str) -> Vec<(String, String)> {
-    // TODO: make the separator configurable instead of hardcoding two spaces
-    let separator = "  ";
-    let max_items = 99; // arbitrary cap to prevent runaway parsing
-    hint.split(separator)
-        .take(max_items)
+    hint.split("  ")
         .filter_map(|item| {
             let item = item.trim();
             let rest = item.strip_prefix("^O,").unwrap_or(item);
             let mut parts = rest.splitn(2, ' ');
             let key = parts.next().filter(|s| !s.is_empty())?.to_string();
             let label = parts.next().unwrap_or("").trim().to_string();
-            Some((key.clone(), label.clone()))
+            Some((key, label))
         })
         .collect()
 }
@@ -214,16 +210,6 @@ impl State {
             self.cursor = 0;
         } else {
             self.cursor = self.cursor.min(len - 1);
-        }
-    }
-
-    /// Returns the name of the session at the current cursor position.
-    /// Panics if the cursor is out of bounds or points at a tab row.
-    pub fn current_session_name(&self) -> &str {
-        let rows = self.build_visible_rows();
-        match rows[self.cursor] {
-            TreeRow::Session(si) => &self.sessions[si].name,
-            TreeRow::Tab(_, _) => panic!("cursor is on a tab, not a session"),
         }
     }
 
