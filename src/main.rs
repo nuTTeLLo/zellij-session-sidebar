@@ -70,17 +70,18 @@ pub struct State {
     pub hint: Option<String>,  // custom footer hint when unfocused
     pub is_hidden: bool,    // true while sidebar is hidden
     pub last_cols: usize,   // last known cols from render()
+    pub last_registered_plugin_id: Option<u32>,  // guards reconfigure() calls
 
     // Attention and AI state — keyed by session name, survive SessionUpdate
     pub attention_sessions: BTreeSet<String>,
+    // TODO(Phase 2): render ai_states/ai_agent_name/ai_state_since/ai_last_duration in sidebar rows
     pub ai_states: BTreeMap<String, AgentState>,
     pub ai_state_since: BTreeMap<String, u64>,
     pub ai_last_duration: BTreeMap<String, u64>,
-    #[allow(dead_code)]
-    pub ai_pane_count: BTreeMap<String, usize>,
     pub ai_agent_name: BTreeMap<String, String>,
 
     // Pills and progress — keyed by session name
+    // TODO(Phase 2): render pills and progress bars in sidebar rows
     pub pills: BTreeMap<String, BTreeMap<String, String>>,
     pub progress: BTreeMap<String, u8>,
 }
@@ -102,11 +103,11 @@ impl Default for State {
             hint: None,
             is_hidden: false,
             last_cols: 0,
+            last_registered_plugin_id: None,
             attention_sessions: BTreeSet::new(),
             ai_states: BTreeMap::new(),
             ai_state_since: BTreeMap::new(),
             ai_last_duration: BTreeMap::new(),
-            ai_pane_count: BTreeMap::new(),
             ai_agent_name: BTreeMap::new(),
             pills: BTreeMap::new(),
             progress: BTreeMap::new(),
@@ -351,13 +352,17 @@ done
         );
     }
 
-    fn setup_toggle_keybind(&self) {
+    fn setup_toggle_keybind(&mut self) {
         let plugin_id = get_plugin_ids().plugin_id;
+        if self.last_registered_plugin_id == Some(plugin_id) {
+            return;
+        }
+        self.last_registered_plugin_id = Some(plugin_id);
         let toggle_key = &self.toggle_key;
         let new_tab_key = &self.new_tab_key;
         // Toggle focus is bound in session mode (Ctrl+O → key).
-        // Hide/show is bound globally so it works from any mode.
-        // New tab is bound in shared mode as it's a creation action.
+        // Hide/show and new-tab are bound in shared_except "locked" so they
+        // don't intercept keys when zellij is in locked mode.
         let config = format!(
             r#"
 keybinds {{
@@ -375,8 +380,6 @@ keybinds {{
                 name "hide_sidebar"
             }}
         }}
-    }}
-    shared {{
         bind "{new_tab_key}" {{
             MessagePluginId {plugin_id} {{
                 name "new_tab_with_sidebar"
@@ -504,10 +507,9 @@ impl ZellijPlugin for State {
             }
             Event::SessionUpdate(sessions, _resurrectable) => {
                 self.rebuild_from_session_update(&sessions);
-                self.load_ai_states();
-                // Re-register keybind on every SessionUpdate — each session's plugin has a
-                // unique plugin_id, so switching sessions would otherwise point the bind at
-                // the wrong instance.
+                // Re-register keybind when the plugin_id changes (i.e. on session switch).
+                // The plugin_id cache in setup_toggle_keybind() prevents redundant reconfigure()
+                // calls on tab/rename updates that also fire SessionUpdate.
                 if self.is_primary && self.permissions_granted {
                     self.setup_toggle_keybind();
                 }
@@ -757,10 +759,11 @@ impl ZellijPlugin for State {
                 true
             }
             "focus_sidebar" => {
-                set_selectable(true);
-                show_self(false);
-                self.is_focused = true;
-                eprintln!("Sidebar activated via pipe (legacy focus_sidebar)");
+                if !self.is_hidden {
+                    set_selectable(true);
+                    self.is_focused = true;
+                    eprintln!("Sidebar activated via pipe (legacy focus_sidebar)");
+                }
                 true
             }
             name if name.starts_with("sidebar::ai-active::") => {
@@ -1237,5 +1240,44 @@ mod tests {
         assert!(matches!(state.ai_states.get("sess-a"), Some(AgentState::Active)));
         assert!(matches!(state.ai_states.get("sess-b"), Some(AgentState::Idle)));
         assert_eq!(state.ai_last_duration.get("sess-b"), Some(&30));
+    }
+
+    // --- parse_hint_items ---
+
+    #[test]
+    fn test_parse_hint_items_empty() {
+        assert!(parse_hint_items("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_hint_items_single() {
+        let items = parse_hint_items("^O,o sidebar");
+        assert_eq!(items, vec![("o".to_string(), "sidebar".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_hint_items_multiple() {
+        let items = parse_hint_items("^O,o sidebar  ^O,w sessions  ^O,f favs");
+        assert_eq!(items, vec![
+            ("o".to_string(), "sidebar".to_string()),
+            ("w".to_string(), "sessions".to_string()),
+            ("f".to_string(), "favs".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn test_parse_hint_items_without_prefix() {
+        // Items without ^O, prefix use the whole token as the key
+        let items = parse_hint_items("x foo  y bar");
+        assert_eq!(items, vec![
+            ("x".to_string(), "foo".to_string()),
+            ("y".to_string(), "bar".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn test_parse_hint_items_extra_whitespace() {
+        let items = parse_hint_items("  ^O,o sidebar  ");
+        assert_eq!(items, vec![("o".to_string(), "sidebar".to_string())]);
     }
 }
