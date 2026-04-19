@@ -1,12 +1,11 @@
 [package]
-name = "zellij-project-sidebar"
+name = "zellij-session-sidebar"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 zellij-tile = "0.44.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 
 [profile.release]
 opt-level = "s"

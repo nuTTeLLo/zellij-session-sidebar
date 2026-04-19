@@ -1,229 +1,213 @@
-# zellij-project-sidebar
+# zellij-session-sidebar
 
-A persistent sidebar plugin for [Zellij](https://zellij.dev) that shows your active project sessions at a glance. Click or keyboard-navigate to switch between projects, start new sessions, and see real-time AI agent activity across all sessions.
+A persistent sidebar plugin for [Zellij](https://zellij.dev) that shows all your active sessions and their tabs in a collapsible tree. Navigate sessions, switch tabs, kill sessions, and get AI agent visibility — all without leaving your current pane.
 
-![screenshot](screenshot.png)
+> **Forked from** [zellij-project-sidebar](https://github.com/AndrewBeniston/zellij-project-sidebar) by Andrew Beniston. The original plugin is directory/project-scan based with fuzzy search and browse mode. This fork pivots to a session-first model — it shows whatever Zellij sessions exist, with their tabs, rather than scanning a directory. The pipe API, AI state machinery, attention system, and hook integration patterns are all inherited and extended from the original. Thank you to Andrew for the solid foundation.
 
-## Quick start
+---
 
-Give this prompt to Claude Code (or your AI coding tool of choice) and it will handle everything:
+## Current status — Phase 1
 
-> Install the zellij-project-sidebar plugin from https://github.com/AndrewBeniston/zellij-project-sidebar. Clone the repo, build with `cargo build --target wasm32-wasip1 --release`, copy the .wasm to `~/.config/zellij/plugins/`. Then update my Zellij layout to include the sidebar with `scan_dir` pointing to my projects directory. Set up Claude Code hooks using the sidebar-status.sh script from the repo so the sidebar shows real-time AI activity indicators across all sessions (see the "AI activity indicators" section in the README for full setup). Also configure the attention system hooks for `sidebar::attention::` and `sidebar::clear::` pipe messages.
+Phase 1 is the working foundation. The sidebar is functional and stable for daily use.
 
-## Why?
+**What works today:**
 
-Zellij has great session management, but no ambient awareness. You can't see at a glance which projects are running, which session you're in, or which one has Claude Code actively working. This plugin gives you a docked sidebar that stays visible across tabs — an agentic AI dashboard for your terminal. Think VS Code's sidebar, but for terminal sessions with real-time AI visibility.
+- **Session tree**: all running Zellij sessions listed with their tabs, expandable/collapsible with `▶`/`▼`
+- **Tab navigation**: expand a session to see its tabs; navigate and jump directly to a specific tab
+- **Current session highlighted**: green text shows where you are
+- **Active tab indicator**: `●` (green) / `○` marks the active tab within each session
+- **Cursor auto-tracks**: when unfocused, the cursor follows the current session
+- **Hide/show toggle**: `Ctrl+/` completely suppresses the sidebar pane — other panes expand to fill — and restores it at its original position via layout override
+- **Toggle focus**: configurable key to focus/unfocus the sidebar (`Ctrl+O, o` by default)
+- **New tab with sidebar**: configurable key creates a new tab using the configured layout
+- **Kill session**: `Delete` on a non-current session kills it
+- **Mouse support**: scroll wheel navigates the list
+- **Attention system**: sessions can be flagged with a pipe message; cleared when you switch to them
+- **AI state storage**: pipe messages for `active`/`idle`/`waiting` states are received and stored per session (not yet rendered — Phase 2)
+- **Pills and progress**: arbitrary key/value pills and 0–100% progress values can be pushed via pipe (not yet rendered — Phase 2)
+- **Stacked hint footer**: when unfocused, the bottom shows a compact key reference parsed from the `hint` config option
 
-## Features
+---
 
-- **AI activity at a glance**: see which sessions have Claude Code (or any AI tool) actively working, idle, or needing input — across all sessions, not just the current one
-- **Duration tracking**: shows how long Claude has been working (live timer), and how long the last turn took when idle
-- **Active sessions at a glance**: only shows projects with running or exited sessions, no clutter
-- **Current session highlighted**: green text shows you exactly where you are
-- **Browse mode**: press `/` to search all discovered projects and start new sessions
-- **Attention indicators**: a magenta `!` appears when a session needs your input
-- **Session lifecycle**: create, switch to, or kill sessions from the sidebar
-- **Auto-discovery**: scans a directory for projects instead of manual configuration
-- **New tab with sidebar**: `Cmd+T` creates tabs that include the sidebar
-- **Mouse support**: click a project to switch, scroll wheel to navigate
-- **Toggle visibility**: `Cmd+O` to focus/unfocus the sidebar
-- **Fuzzy search**: subsequence matching in browse mode
+## Planned phases
 
-## Install
+### Phase 2 — AI and status rendering
+Render the state that is already being stored:
+- AI agent indicators next to session names (`active` / `idle` / `waiting` with duration)
+- Progress bars inline with session rows
+- Pills (small key=value badges) per session
+- Make the hide key configurable (currently hardcoded to `Ctrl+/`)
 
-### Build from source
+### Phase 3 — Polish and UX
+- Sessionizer integration (fuzzy-launch a new session from a directory)
+- Favourites pinning
+- Configurable column layout (compact / full)
+- Per-session tab count badge
+
+---
+
+## Build
+
+Requires Rust with the `wasm32-wasip1` target:
 
 ```bash
-git clone https://github.com/AndrewBeniston/zellij-project-sidebar.git
-cd zellij-project-sidebar
+rustup target add wasm32-wasip1
 cargo build --target wasm32-wasip1 --release
-cp target/wasm32-wasip1/release/zellij-project-sidebar.wasm ~/.config/zellij/plugins/
 ```
 
-> Requires Rust with the `wasm32-wasip1` target: `rustup target add wasm32-wasip1`
+The plugin binary is at `target/wasm32-wasip1/release/zellij-session-sidebar.wasm`.
 
-## Configuration
+---
 
-Add the plugin to your Zellij layout (e.g. `~/.config/zellij/layouts/default.kdl`):
+## Layout setup
 
-### Discovery mode (recommended)
-
-Automatically discovers projects from a directory:
+Add the sidebar to your Zellij layout. The `session_layout` path should point back at the same layout file — the sidebar uses it to restore its position when toggled back on.
 
 ```kdl
 layout {
-    pane size=1 borderless=true {
-        plugin location="tab-bar"
-    }
-    pane split_direction="vertical" {
-        pane size="15%" name="Projects" {
-            plugin location="file:~/.config/zellij/plugins/zellij-project-sidebar.wasm" {
-                scan_dir "/Users/you/Projects"
-                session_layout "/Users/you/.config/zellij/layouts/default.kdl"
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane size="10%" borderless=true {
+                plugin location="file:~/.config/zellij/plugins/zellij-session-sidebar.wasm" {
+                    is_primary         true
+                    session_layout     "~/.config/zellij/layouts/default.kdl"
+                    hint               "^O,o sidebar  ^O,w sessions  ^O,r sessionizer  ^O,t picker  ^O,f favs"
+                }
+            }
+            pane {
+                children
             }
         }
-        pane
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
     }
 }
 ```
 
-| Option | Description |
-|--------|-------------|
-| `scan_dir` | Directory to scan for project folders |
-| `session_layout` | Layout file applied when creating new sessions |
-| `verbosity` | `"full"` (default) or `"minimal"` to control tab count and command display |
+### Configuration options
 
-### Legacy mode
+| Option | Default | Description |
+|--------|---------|-------------|
+| `session_layout` | — | Path to the layout file used when restoring the sidebar and creating new tabs. Supports `~`. |
+| `is_primary` | `true` | Only the primary instance registers global keybinds. Set `false` on secondary instances. |
+| `toggle_key` | `o` | Key pressed after `Ctrl+O` to toggle sidebar focus. |
+| `new_tab_key` | `Ctrl t` | Key that opens a new tab using `session_layout`. |
+| `hint` | — | Footer hint string shown when sidebar is unfocused. Format: `^O,<key> <label>  ^O,<key> <label>` |
 
-Manually list projects:
-
-```kdl
-plugin location="file:~/.config/zellij/plugins/zellij-project-sidebar.wasm" {
-    project_0 "/Users/you/Projects/my-app"
-    project_1 "/Users/you/Projects/api-server"
-    project_2 "/Users/you/Projects/docs"
-}
-```
+---
 
 ## Keybindings
+
+### Global (registered by the plugin)
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+/` | Toggle sidebar visibility (hide/show) |
+| `Ctrl+O, <toggle_key>` | Toggle sidebar focus |
+| `<new_tab_key>` | New tab with sidebar layout |
+
+> The hide key (`Ctrl+/`) is currently hardcoded. Configurability is planned for Phase 2.
 
 ### When sidebar is focused
 
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` | Navigate projects |
-| `Enter` | Switch to session (or create if not started) |
-| `Delete` | Kill selected session |
-| `/` | Enter browse mode (search all projects) |
+| `↑` / `↓` | Navigate sessions and tabs |
+| `→` | Expand session to show tabs |
+| `←` | Collapse session (or jump to parent if on a tab) |
+| `Enter` | Switch to session / jump to tab |
+| `Delete` | Kill selected session (no-op on current session) |
 | `Esc` | Deactivate sidebar |
-| `Alt+R` | Rescan project directory |
-| Click | Switch to clicked project |
-| Scroll | Navigate projects |
+| Scroll | Navigate list |
 
-### Browse mode
-
-| Key | Action |
-|-----|--------|
-| Type | Fuzzy search projects |
-| `Enter` | Open selected project |
-| `Backspace` | Delete search character |
-| `Esc` | Exit browse mode |
-
-### Global (registered by plugin)
-
-| Key | Action |
-|-----|--------|
-| `Cmd+O` / `Super+O` | Toggle sidebar focus |
-| `Cmd+T` / `Super+T` | New tab with sidebar |
-
-> `Cmd` keys require a terminal that passes them through (e.g. Ghostty with `keybind = cmd+o=unbind`).
-
-## Session status indicators
-
-| Symbol | Colour | Meaning |
-|--------|--------|---------|
-| `▶` | Green | AI agent is actively working |
-| `■` | Cyan | AI agent is idle (done/waiting) |
-| `!` | Magenta | Needs attention |
-| `·` | Orange | Running session, no AI |
-| `·` | Orange | Exited (resurrectable) session |
-| `·` | Cyan | Not started |
-
-The current session's name is highlighted in green. Sessions with AI activity show a detail line with "claude" and duration info (e.g. `claude · 30s` while working, `claude · took 2m` when done).
+---
 
 ## Attention system
 
-The sidebar shows a magenta `!` indicator when a session needs your attention. This is powered by Zellij's pipe messaging:
+Flag a session as needing your attention via Zellij pipe:
 
 ```bash
-# Flag a session as needing attention
-zellij pipe --name "sidebar::attention::session-name"
+# Flag
+zellij pipe --name "sidebar::attention::my-session"
 
-# Clear attention for a session
-zellij pipe --name "sidebar::clear::session-name"
+# Clear
+zellij pipe --name "sidebar::clear::my-session"
 ```
 
-Attention is automatically cleared when you switch to a session via the sidebar.
+Attention is automatically cleared when you switch to the session via the sidebar.
 
-## AI activity indicators
+---
 
-The sidebar shows real-time AI agent activity across all your Zellij sessions. When Claude Code (or any AI tool) is working in a session, you'll see it at a glance without switching sessions.
+## Pipe API
 
-### How it works
+All pipe messages are sent with `zellij pipe --name "<message>"`.
 
-AI state is shared across all sessions via per-session files in `$TMPDIR/zellij-$(id -u)/sidebar-ai/`. Each sidebar instance reads these files on a ~10-second timer, so cross-session state appears within seconds. Pipe messages provide instant updates for the current session.
-
-### Setting up Claude Code hooks
-
-Copy the hook script from the repo to your Claude hooks directory:
+### AI state (stored now, rendered in Phase 2)
 
 ```bash
-cp scripts/sidebar-status.sh ~/.claude/hooks/sidebar-status.sh
-chmod +x ~/.claude/hooks/sidebar-status.sh
+zellij pipe --name "sidebar::ai-active::my-session"    # agent is working
+zellij pipe --name "sidebar::ai-idle::my-session"      # agent finished
+zellij pipe --name "sidebar::ai-waiting::my-session"   # agent needs input
+
+# Optionally tag the agent name with ::agent-name suffix
+zellij pipe --name "sidebar::ai-active::my-session::claude"
 ```
 
-Then register it in `~/.claude/settings.json`:
+### Pills (stored now, rendered in Phase 2)
+
+```bash
+zellij pipe --name "sidebar::pill" \
+    --args "session=my-session,key=branch,value=main"
+
+zellij pipe --name "sidebar::pill-clear" \
+    --args "session=my-session,key=branch"   # clear one
+zellij pipe --name "sidebar::pill-clear" \
+    --args "session=my-session"              # clear all
+```
+
+### Progress (stored now, rendered in Phase 2)
+
+```bash
+zellij pipe --name "sidebar::progress" \
+    --args "session=my-session,pct=42"
+
+zellij pipe --name "sidebar::progress-clear" \
+    --args "session=my-session"
+```
+
+---
+
+## Claude Code hook integration
+
+AI state is shared across sessions via files in `$TMPDIR/zellij-$(id -u)/sidebar-ai/`. The sidebar polls this directory every 10 seconds for cross-session visibility, and pipe messages provide instant updates in the current session.
+
+Register a hook script in `~/.claude/settings.json` to push state automatically:
 
 ```json
 {
   "hooks": {
     "PostToolUse": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/sidebar-status.sh", "async": true }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/sidebar-status.sh", "async": true }] }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/sidebar-status.sh", "async": true }] }],
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/sidebar-status.sh", "async": true }] }]
+    "Stop":        [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/sidebar-status.sh", "async": true }] }],
+    "Notification":[{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/sidebar-status.sh", "async": true }] }],
+    "SessionStart":[{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/sidebar-status.sh", "async": true }] }]
   }
 }
 ```
 
-The hook script handles everything: it writes state files for cross-session visibility and sends pipe messages for instant current-session updates. It also tracks turn duration so you can see how long Claude worked.
+The hook script should write the state file and send the appropriate pipe message. See the original [zellij-project-sidebar](https://github.com/AndrewBeniston/zellij-project-sidebar) for a reference hook script.
 
-> **Note:** The hooks fire on tool use events. Plain text responses (no tool calls) and "thinking" time don't trigger hooks, so the sidebar only reflects tool-based activity.
-
-### Other AI tools
-
-Any tool can integrate — just write to the shared state directory:
-
-```bash
-# Signal that an AI agent is working in the current session
-echo "active $(date +%s)" > "${TMPDIR:-/tmp/}zellij-$(id -u)/sidebar-ai/$ZELLIJ_SESSION_NAME"
-
-# Or use pipes for instant updates in the current session
-zellij pipe --name "sidebar::ai-active::$ZELLIJ_SESSION_NAME"
-```
-
-### Pipe API reference
-
-| Pipe name | Effect |
-|-----------|--------|
-| `sidebar::ai-active::<session>` | Show AI as working (`▶` green) |
-| `sidebar::ai-idle::<session>` | Show AI as idle (`■` cyan) |
-| `sidebar::ai-waiting::<session>` | Show AI as waiting (`■` cyan) |
-| `sidebar::attention::<session>` | Flag session for attention (`!` magenta) |
-| `sidebar::clear::<session>` | Clear attention flag |
-
-## Reloading the plugin
-
-A build script handles compiling and installing:
-
-```bash
-./scripts/reload-all.sh
-```
-
-After installing, reload the plugin in each session via the Zellij plugin manager: **Ctrl+O, P**, select the sidebar, then press **Enter** to reload. The sidebar's snapshot restore ensures projects appear instantly on reload with no blank flash.
-
-> **Note:** There is no Zellij CLI command to reload a layout-loaded plugin in-place. The manual Ctrl+O, P approach is the only reliable method.
-
-## Pairs well with
-
-This plugin handles session-level awareness. For the full picture, it works nicely alongside:
-
-- [**zellij-sessionizer**](https://github.com/lapce/zellij-sessionizer): fuzzy directory search for starting sessions from anywhere on disk, not just your `scan_dir`. Good for one-off projects.
-- [**zellij-choose-tree**](https://github.com/lapce/zellij-choose-tree): tree view for jumping between tabs and panes *within* a session. The sidebar handles between-session navigation, choose-tree handles within-session.
+---
 
 ## Requirements
 
-- Zellij 0.43.x+
-- Rust with `wasm32-wasip1` target
+- Zellij 0.44.x+
+- Rust with `wasm32-wasip1` target (`rustup target add wasm32-wasip1`)
+
+---
 
 ## Licence
 
