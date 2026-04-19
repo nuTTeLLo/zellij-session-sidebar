@@ -19,19 +19,14 @@ const CMD_LOAD_AI: &str = "load_ai";
 
 // --- Data Model ---
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     Active,
     Idle,
     Waiting,
+    #[default]
     Unknown,
-}
-
-impl Default for AgentState {
-    fn default() -> Self {
-        AgentState::Unknown
-    }
 }
 
 #[derive(Clone)]
@@ -497,13 +492,11 @@ impl ZellijPlugin for State {
                 eprintln!("Permissions denied — plugin cannot function");
                 false
             }
-            Event::RunCommandResult(_, stdout, _, context) => {
-                if context.get(CMD_KEY).map(|s| s.as_str()) == Some(CMD_LOAD_AI) {
-                    self.apply_ai_states_from_output(&stdout);
-                    true
-                } else {
-                    false
-                }
+            Event::RunCommandResult(_, stdout, _, context)
+                if context.get(CMD_KEY).map(|s| s.as_str()) == Some(CMD_LOAD_AI) =>
+            {
+                self.apply_ai_states_from_output(&stdout);
+                true
             }
             Event::SessionUpdate(sessions, _resurrectable) => {
                 self.rebuild_from_session_update(&sessions);
@@ -571,7 +564,7 @@ impl ZellijPlugin for State {
                     if let Some(si) = self.cursor_session_index() {
                         let session = &self.sessions[si];
                         if !session.is_current {
-                            kill_sessions(&[session.name.clone()]);
+                            kill_sessions(std::slice::from_ref(&session.name));
                         }
                     }
                     true
