@@ -370,6 +370,9 @@ keybinds {{
         }}
     }}
     shared_except "locked" {{
+        // TODO: make hide key configurable via plugin config (e.g. hide_key = "Ctrl /")
+        // same pattern as toggle_key and new_tab_key — add hide_key field to State,
+        // read from configuration in load(), use here instead of the hardcoded string.
         bind "Ctrl /" {{
             MessagePluginId {plugin_id} {{
                 name "hide_sidebar"
