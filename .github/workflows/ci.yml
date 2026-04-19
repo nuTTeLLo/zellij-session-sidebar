@@ -60,14 +60,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zellij-session-sidebar
-          path: target/wasm32-wasip1/release/zellij_session_sidebar.wasm
+          path: target/wasm32-wasip1/release/zellij_session_sidebar*.wasm
           retention-days: 30
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
-          files: target/wasm32-wasip1/release/zellij_session_sidebar.wasm
+          files: target/wasm32-wasip1/release/zellij_session_sidebar*.wasm
           asset_name: zellij-session-sidebar.wasm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
