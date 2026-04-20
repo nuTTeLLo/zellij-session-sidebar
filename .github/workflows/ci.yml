@@ -70,7 +70,6 @@ jobs:
           files: target/wasm32-wasip1/release/zellij-session-sidebar.wasm
           asset_name: zellij-session-sidebar.wasm
           name: zellij-session-sidebar ${{ github.ref_name }}
-          draft: true
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
