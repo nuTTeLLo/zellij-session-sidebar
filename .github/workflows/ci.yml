@@ -4,9 +4,12 @@ on:
   push:
     branches: ["**"]
     tags:
-      - 'v*'
+      - "v*"
   pull_request:
     branches: ["**"]
+
+permissions:
+  contents: write
 
 jobs:
   test:
